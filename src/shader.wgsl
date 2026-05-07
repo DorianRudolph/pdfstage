@@ -113,11 +113,27 @@ fn magnifier_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     let outline_inner = max(1.0, scale * 0.0042);
     let dist = length(delta);
     let shadow = smoothstep(radius + shadow_width, radius, dist) * 0.25;
-    let scale_factor = 1.5;
     var out = vec4<f32>(color.rgb * (1.0 - shadow), color.a);
     if (dist < radius) {
-        let zoomed = center + delta / scale_factor;
-        out = sample_page(zoomed);
+        let lens_r = clamp(dist / radius, 0.0, 1.0);
+        let lens_r2 = lens_r * lens_r;
+        let edge_falloff = 1.0 - lens_r2;
+        let magnification = 1.24 + 0.16 * edge_falloff * edge_falloff;
+        let spherical = 1.0 + 0.025 * lens_r2 * edge_falloff;
+        let lens_sample = center + delta / (magnification * spherical);
+
+        let radial = delta / max(dist, 0.001);
+        let chroma = 0.28 * lens_r2 * lens_r2;
+        let red = sample_page(lens_sample - radial * chroma).r;
+        let green = sample_page(lens_sample).g;
+        let blue = sample_page(lens_sample + radial * chroma).b;
+
+        let rim = smoothstep(0.58, 1.0, lens_r);
+        let caustic = smoothstep(1.0, 0.70, lens_r) * 0.025;
+        let highlight_center = vec2<f32>(-0.36, -0.42) * radius;
+        let highlight = smoothstep(radius * 0.30, 0.0, length(delta - highlight_center)) * 0.06;
+        let glass = vec3<f32>(red, green, blue) * (1.0 - rim * 0.07) + vec3<f32>(0.82, 0.96, 1.0) * (highlight + caustic);
+        out = vec4<f32>(clamp(glass, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
     let outline = smoothstep(radius + outline_outer, radius, dist) - smoothstep(radius, radius - outline_inner, dist);
     out = mix(out, vec4<f32>(0.0, 0.0, 0.0, 1.0), clamp(outline, 0.0, 1.0));
