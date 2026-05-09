@@ -853,6 +853,16 @@ impl PresenterWindow {
         self.surface.configure(&gpu.device, &self.config);
     }
 
+    fn sync_surface_size(&mut self, gpu: &Gpu) -> bool {
+        let size = self.window.surface_size();
+        if size.width == 0 || size.height == 0 || size == self.surface_size {
+            return false;
+        }
+        self.pending_aspect_size = None;
+        self.resize(gpu, size);
+        true
+    }
+
     fn set_page(&mut self, request: RenderRequest) {
         self.wanted_request_id = request.request_id;
         self.worker.request(request);
@@ -1011,11 +1021,13 @@ impl PresenterWindow {
 
     fn toggle_fullscreen(&mut self) {
         self.fullscreen = !self.fullscreen;
+        self.pending_aspect_size = None;
         self.window.set_fullscreen(if self.fullscreen {
             Some(Fullscreen::Borderless(None))
         } else {
             None
         });
+        self.window.request_redraw();
     }
 
     fn toggle_decorations(&mut self) {
@@ -1267,8 +1279,12 @@ impl ApplicationHandler for App {
                 self.schedule_all();
             }
             WindowEvent::RedrawRequested => {
+                let resized = window.sync_surface_size(gpu);
                 if let Err(err) = window.draw(gpu) {
                     eprintln!("{err:?}");
+                }
+                if resized {
+                    self.schedule_all();
                 }
             }
             WindowEvent::PointerMoved { position, .. } => window.pointer_moved(position),
