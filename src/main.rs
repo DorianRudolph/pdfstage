@@ -104,13 +104,21 @@ fn set_macos_app_icon() {}
 struct Args {
     pdf: PathBuf,
 
-    #[arg(long, help = "Open a second mirror window for screensharing")]
+    #[arg(short, long, help = "Open a second mirror window for screensharing")]
     mirror: bool,
 
-    #[arg(long, help = "Poll the PDF and reload it when it changes")]
+    #[arg(short = 'r', long, help = "Poll the PDF and reload it when it changes")]
     hot_reload: bool,
 
     #[arg(
+        short = 'f',
+        long,
+        help = "Allow windows to be resized without preserving slide aspect"
+    )]
+    free_aspect: bool,
+
+    #[arg(
+        short = 'c',
         long,
         default_value_t = 1024,
         help = "Per-window GPU page cache budget in MiB"
@@ -118,6 +126,7 @@ struct Args {
     cache_mib: u64,
 
     #[arg(
+        short = 'a',
         long,
         default_value_t = 3,
         help = "Pages to render ahead of the current page"
@@ -1658,6 +1667,7 @@ impl PresenterWindow {
         &mut self,
         position: PhysicalPosition<f64>,
         page_points: [f32; 2],
+        preserve_aspect: bool,
     ) -> bool {
         let Some(drag) = self.resize_drag else {
             return false;
@@ -1669,7 +1679,11 @@ impl PresenterWindow {
             .round()
             .max(64.0) as u32;
         let size = PhysicalSize::new(width, height);
-        let requested = aspect_corrected_size(size, page_points).unwrap_or(size);
+        let requested = if preserve_aspect {
+            aspect_corrected_size(size, page_points).unwrap_or(size)
+        } else {
+            size
+        };
         self.pending_aspect_size = Some(requested);
         let _ = self.window.request_surface_size(requested.into());
         true
@@ -2033,9 +2047,11 @@ impl App {
                 window.reset_zoom_for_slide_change();
             }
         }
-        let requested_size = window_size_for_page(self.page_points);
-        for window in self.windows.values() {
-            let _ = window.window.request_surface_size(requested_size.into());
+        if !self.args.free_aspect {
+            let requested_size = window_size_for_page(self.page_points);
+            for window in self.windows.values() {
+                let _ = window.window.request_surface_size(requested_size.into());
+            }
         }
         self.update_window_titles();
         self.schedule_all();
@@ -2090,7 +2106,7 @@ impl ApplicationHandler for App {
             WindowEvent::SurfaceResized(size) => {
                 let fullscreen_or_transition =
                     window.window.fullscreen().is_some() || window.in_fullscreen_transition();
-                if !fullscreen_or_transition {
+                if !fullscreen_or_transition && !self.args.free_aspect {
                     if let Some(pending) = window.pending_aspect_size.take() {
                         if size == pending {
                             window.resize(gpu, size);
@@ -2121,7 +2137,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerMoved { position, .. } => {
-                if window.update_modified_window_resize(position, self.page_points) {
+                if window.update_modified_window_resize(
+                    position,
+                    self.page_points,
+                    !self.args.free_aspect,
+                ) {
                     return;
                 }
                 if self.mirror_pointer_moved(window_id, position) {

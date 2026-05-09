@@ -26,10 +26,11 @@ Options:
 ```sh
 pdfpresenter [OPTIONS] <PDF>
 
---mirror                 Open a second mirror window
---hot-reload             Reload when the PDF file changes
---cache-mib <MiB>        Per-window GPU page cache budget [default: 1024]
---ahead <N>              Pages to render ahead [default: 3]
+-m, --mirror             Open a second mirror window
+-r, --hot-reload         Reload when the PDF file changes
+-f, --free-aspect        Allow windows to resize without preserving slide aspect
+-c, --cache-mib <MiB>    Per-window GPU page cache budget [default: 1024]
+-a, --ahead <N>          Pages to render ahead [default: 3]
 ```
 
 ## Controls
