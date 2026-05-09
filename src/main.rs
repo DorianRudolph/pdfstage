@@ -21,6 +21,7 @@ use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    icon::{Icon, RgbaIcon},
     keyboard::{Key, ModifiersState, NamedKey},
     monitor::Fullscreen,
     window::{Window, WindowAttributes, WindowId},
@@ -29,9 +30,11 @@ use winit::{
 #[cfg(target_os = "macos")]
 use block2::RcBlock;
 #[cfg(target_os = "macos")]
-use objc2::{rc::Retained, runtime::AnyObject};
+use objc2::{AnyThread, MainThreadMarker, rc::Retained, runtime::AnyObject};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
+use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventType, NSImage};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSData;
 #[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 
@@ -39,6 +42,55 @@ const LASER_POINTS: usize = 64;
 const FLAG_LASER: u32 = 1;
 const FLAG_HIGHLIGHT: u32 = 2;
 const FLAG_MAGNIFY: u32 = 4;
+const APP_ICON_SIZE: u32 = 256;
+const APP_ICON_RGBA: &[u8] = include_bytes!("../assets/app-icon.rgba");
+#[cfg(target_os = "macos")]
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
+#[cfg(target_os = "macos")]
+const APP_ICON_SVG: &[u8] = include_bytes!("../assets/app-icon.svg");
+
+fn app_window_icon() -> Option<Icon> {
+    let expected_len = APP_ICON_SIZE as usize * APP_ICON_SIZE as usize * 4;
+    if APP_ICON_RGBA.len() != expected_len {
+        eprintln!(
+            "invalid app icon RGBA data: expected {expected_len} bytes, got {}",
+            APP_ICON_RGBA.len()
+        );
+        return None;
+    }
+    RgbaIcon::new(APP_ICON_RGBA.to_vec(), APP_ICON_SIZE, APP_ICON_SIZE)
+        .map(Icon::from)
+        .map_err(|err| eprintln!("invalid app icon RGBA data: {err}"))
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_app_icon() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    // Recent macOS releases can initialize NSImage from SVG data. Keep PNG as
+    // a fallback for older systems or stricter image loaders.
+    let Some(image) =
+        ns_image_from_bytes(APP_ICON_SVG).or_else(|| ns_image_from_bytes(APP_ICON_PNG))
+    else {
+        eprintln!("failed to load app icon with NSImage");
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    unsafe {
+        app.setApplicationIconImage(Some(&image));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ns_image_from_bytes(bytes: &[u8]) -> Option<Retained<NSImage>> {
+    let data = NSData::with_bytes(bytes);
+    NSImage::initWithData(NSImage::alloc(), &data)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_macos_app_icon() {}
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Minimal MuPDF/WGPU PDF presentation viewer")]
@@ -51,10 +103,18 @@ struct Args {
     #[arg(long, help = "Poll the PDF and reload it when it changes")]
     hot_reload: bool,
 
-    #[arg(long, default_value_t = 1024, help = "Per-window GPU page cache budget in MiB")]
+    #[arg(
+        long,
+        default_value_t = 1024,
+        help = "Per-window GPU page cache budget in MiB"
+    )]
     cache_mib: u64,
 
-    #[arg(long, default_value_t = 3, help = "Pages to render ahead of the current page")]
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Pages to render ahead of the current page"
+    )]
     ahead: i32,
 }
 
@@ -81,7 +141,9 @@ fn install_macos_swipe_monitor(tx: Sender<i32>, proxy: EventLoopProxy) -> Option
     let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         let ns_event = unsafe { event.as_ref() };
         if ns_event.r#type() == NSEventType::Swipe {
-            if let Some(delta) = swipe_navigation_delta(ns_event.deltaX() as f64, ns_event.deltaY() as f64) {
+            if let Some(delta) =
+                swipe_navigation_delta(ns_event.deltaX() as f64, ns_event.deltaY() as f64)
+            {
                 let _ = tx.send(delta);
                 proxy.wake_up();
             }
@@ -89,7 +151,9 @@ fn install_macos_swipe_monitor(tx: Sender<i32>, proxy: EventLoopProxy) -> Option
         event.as_ptr()
     });
 
-    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::Swipe, &block) };
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::Swipe, &block)
+    };
     monitor.map(|monitor| MacSwipeMonitor {
         monitor,
         _block: block,
@@ -97,7 +161,10 @@ fn install_macos_swipe_monitor(tx: Sender<i32>, proxy: EventLoopProxy) -> Option
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_macos_swipe_monitor(_tx: Sender<i32>, _proxy: EventLoopProxy) -> Option<MacSwipeMonitor> {
+fn install_macos_swipe_monitor(
+    _tx: Sender<i32>,
+    _proxy: EventLoopProxy,
+) -> Option<MacSwipeMonitor> {
     None
 }
 
@@ -255,7 +322,9 @@ impl RenderWorker {
         let (result_tx, result_rx) = mpsc::channel();
         thread::Builder::new()
             .name("mupdf-render-worker".to_string())
-            .spawn(move || render_worker_loop(device, queue, cache_limit, request_rx, result_tx, proxy))
+            .spawn(move || {
+                render_worker_loop(device, queue, cache_limit, request_rx, result_tx, proxy)
+            })
             .expect("spawn render worker");
         Self {
             tx: request_tx,
@@ -359,13 +428,21 @@ fn render_worker_loop(
             document = match Document::from_bytes(&request.source.bytes, "pdf") {
                 Ok(doc) => Some(doc),
                 Err(err) => {
-                    send_render_result(&tx, &proxy, RenderResult::Error(format!("MuPDF open failed: {err}")));
+                    send_render_result(
+                        &tx,
+                        &proxy,
+                        RenderResult::Error(format!("MuPDF open failed: {err}")),
+                    );
                     None
                 }
             };
             document_generation = request.source.generation;
-            cache.map.retain(|key, _| key.generation == document_generation);
-            cache.lru.retain(|key| key.generation == document_generation);
+            cache
+                .map
+                .retain(|key, _| key.generation == document_generation);
+            cache
+                .lru
+                .retain(|key| key.generation == document_generation);
             cache.bytes = cache.map.values().map(|p| p.bytes).sum();
         }
 
@@ -378,15 +455,24 @@ fn render_worker_loop(
 
         if let Ok(page) = document.load_page(request.current_page as i32) {
             if let Ok(bounds) = page.bounds() {
-                send_render_result(&tx, &proxy, RenderResult::PageSize {
-                    generation: request.source.generation,
-                    page_points: [bounds.width().max(1.0), bounds.height().max(1.0)],
-                    page_count: request.page_count,
-                });
+                send_render_result(
+                    &tx,
+                    &proxy,
+                    RenderResult::PageSize {
+                        generation: request.source.generation,
+                        page_points: [bounds.width().max(1.0), bounds.height().max(1.0)],
+                        page_count: request.page_count,
+                    },
+                );
             }
         }
 
-        for page_index in prefetch_order(request.current_page, request.page_count, request.direction, request.ahead) {
+        for page_index in prefetch_order(
+            request.current_page,
+            request.page_count,
+            request.direction,
+            request.ahead,
+        ) {
             if !drain_render_messages(&rx, &mut latest) {
                 return;
             }
@@ -394,17 +480,26 @@ fn render_worker_loop(
                 break;
             }
 
-            let key = render_key_for_page(document, request.source.generation, page_index, request.size);
+            let key = render_key_for_page(
+                document,
+                request.source.generation,
+                page_index,
+                request.size,
+            );
             let Ok(Some(key)) = key else {
                 continue;
             };
             let primary = page_index == request.current_page;
             if let Some(page) = cache.get(&key) {
-                send_render_result(&tx, &proxy, RenderResult::Ready {
-                    page,
-                    request_id: request.request_id,
-                    primary,
-                });
+                send_render_result(
+                    &tx,
+                    &proxy,
+                    RenderResult::Ready {
+                        page,
+                        request_id: request.request_id,
+                        primary,
+                    },
+                );
                 continue;
             }
 
@@ -422,14 +517,25 @@ fn render_worker_loop(
                         ..page
                     };
                     cache.insert(page.clone());
-                    send_render_result(&tx, &proxy, RenderResult::Ready {
-                        page,
-                        request_id: request.request_id,
-                        primary,
-                    });
+                    send_render_result(
+                        &tx,
+                        &proxy,
+                        RenderResult::Ready {
+                            page,
+                            request_id: request.request_id,
+                            primary,
+                        },
+                    );
                 }
                 Err(err) => {
-                    send_render_result(&tx, &proxy, RenderResult::Error(format!("render page {} failed: {err}", page_index + 1)));
+                    send_render_result(
+                        &tx,
+                        &proxy,
+                        RenderResult::Error(format!(
+                            "render page {} failed: {err}",
+                            page_index + 1
+                        )),
+                    );
                 }
             }
         }
@@ -493,7 +599,8 @@ fn render_key_for_page(
     let bounds = loaded_page.bounds()?;
     let page_width = bounds.width().max(1.0);
     let page_height = bounds.height().max(1.0);
-    let scale = (surface_size.width as f32 / page_width).min(surface_size.height as f32 / page_height);
+    let scale =
+        (surface_size.width as f32 / page_width).min(surface_size.height as f32 / page_height);
     let width = (page_width * scale).round().max(1.0) as u32;
     let height = (page_height * scale).round().max(1.0) as u32;
     Ok(Some(RenderKey {
@@ -512,7 +619,8 @@ fn render_page_to_texture(
 ) -> Result<RenderedPage> {
     let page = document.load_page(key.page as i32)?;
     let bounds = page.bounds()?;
-    let scale = (key.width as f32 / bounds.width().max(1.0)).min(key.height as f32 / bounds.height().max(1.0));
+    let scale = (key.width as f32 / bounds.width().max(1.0))
+        .min(key.height as f32 / bounds.height().max(1.0));
     let matrix = Matrix::new_scale(scale, scale);
     let pixmap = page.to_pixmap(&matrix, &Colorspace::device_rgb(), false, true)?;
     let width = pixmap.width();
@@ -523,7 +631,11 @@ fn render_page_to_texture(
     }
 
     let mut rgba = vec![255_u8; (width * height * 4) as usize];
-    for (src, dst) in pixmap.samples().chunks_exact(n).zip(rgba.chunks_exact_mut(4)) {
+    for (src, dst) in pixmap
+        .samples()
+        .chunks_exact(n)
+        .zip(rgba.chunks_exact_mut(4))
+    {
         dst[0] = src[0];
         dst[1] = src[1];
         dst[2] = src[2];
@@ -628,16 +740,20 @@ impl Gpu {
         let surface_format = config.format;
         surface.configure(&device, &config);
 
-        let uniform_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("uniform-buffer"),
-            contents: bytemuck::bytes_of(&Uniforms::zeroed()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        }));
-        let laser_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("laser-buffer"),
-            contents: bytemuck::cast_slice(&[LaserPoint::zeroed(); LASER_POINTS]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        }));
+        let uniform_buffer = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("uniform-buffer"),
+                contents: bytemuck::bytes_of(&Uniforms::zeroed()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+        let laser_buffer = Arc::new(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("laser-buffer"),
+                contents: bytemuck::cast_slice(&[LaserPoint::zeroed(); LASER_POINTS]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }),
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pdf-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -826,6 +942,7 @@ impl PresenterWindow {
                 WindowAttributes::default()
                     .with_title(title)
                     .with_visible(true)
+                    .with_window_icon(app_window_icon())
                     .with_surface_size(initial_size),
             )
             .context("creating window")?;
@@ -903,7 +1020,8 @@ impl PresenterWindow {
     fn page_image_size(&self, page_points: [f32; 2]) -> [f64; 2] {
         let page_width = page_points[0].max(1.0) as f64;
         let page_height = page_points[1].max(1.0) as f64;
-        let scale = (self.surface_size.width as f64 / page_width).min(self.surface_size.height as f64 / page_height);
+        let scale = (self.surface_size.width as f64 / page_width)
+            .min(self.surface_size.height as f64 / page_height);
         [
             (page_width * scale).round().max(1.0),
             (page_height * scale).round().max(1.0),
@@ -920,14 +1038,28 @@ impl PresenterWindow {
         ]
     }
 
-    fn page_unit_at(&self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> PhysicalPosition<f64> {
+    fn page_unit_at(
+        &self,
+        position: PhysicalPosition<f64>,
+        page_points: [f32; 2],
+    ) -> PhysicalPosition<f64> {
         let rect = self.page_image_rect(page_points);
-        PhysicalPosition::new((position.x - rect[0]) / rect[2], (position.y - rect[1]) / rect[3])
+        PhysicalPosition::new(
+            (position.x - rect[0]) / rect[2],
+            (position.y - rect[1]) / rect[3],
+        )
     }
 
-    fn position_for_page_unit(&self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> PhysicalPosition<f64> {
+    fn position_for_page_unit(
+        &self,
+        position: PhysicalPosition<f64>,
+        page_points: [f32; 2],
+    ) -> PhysicalPosition<f64> {
         let rect = self.page_image_rect(page_points);
-        PhysicalPosition::new(rect[0] + position.x * rect[2], rect[1] + position.y * rect[3])
+        PhysicalPosition::new(
+            rect[0] + position.x * rect[2],
+            rect[1] + position.y * rect[3],
+        )
     }
 
     fn set_page(&mut self, request: RenderRequest) {
@@ -935,15 +1067,31 @@ impl PresenterWindow {
         self.worker.request(request);
     }
 
-    fn poll_worker(&mut self, gpu: &Gpu, generation: u64, current_page: usize, page_count: usize, direction: i32) {
+    fn poll_worker(
+        &mut self,
+        gpu: &Gpu,
+        generation: u64,
+        current_page: usize,
+        page_count: usize,
+        direction: i32,
+    ) {
         while let Ok(message) = self.worker.rx.try_recv() {
             match message {
-                RenderResult::Ready { page, request_id, primary } => {
+                RenderResult::Ready {
+                    page,
+                    request_id,
+                    primary,
+                } => {
                     let requested_current_page = primary
                         && request_id > self.displayed_request_id
                         && request_id <= self.wanted_request_id
-                        && self.is_page_between_displayed_and_current(page.key.page, current_page, direction);
-                    let latest_current_page = request_id == self.wanted_request_id && page.key.page == current_page;
+                        && self.is_page_between_displayed_and_current(
+                            page.key.page,
+                            current_page,
+                            direction,
+                        );
+                    let latest_current_page =
+                        request_id == self.wanted_request_id && page.key.page == current_page;
                     if page.key.generation == generation
                         && (requested_current_page || latest_current_page)
                     {
@@ -953,7 +1101,11 @@ impl PresenterWindow {
                         self.window.request_redraw();
                     }
                 }
-                RenderResult::PageSize { generation: msg_generation, page_points, page_count: msg_page_count } => {
+                RenderResult::PageSize {
+                    generation: msg_generation,
+                    page_points,
+                    page_count: msg_page_count,
+                } => {
                     if msg_generation == generation && msg_page_count == page_count {
                         let _ = page_points;
                     }
@@ -963,7 +1115,12 @@ impl PresenterWindow {
         }
     }
 
-    fn is_page_between_displayed_and_current(&self, page: usize, current_page: usize, direction: i32) -> bool {
+    fn is_page_between_displayed_and_current(
+        &self,
+        page: usize,
+        current_page: usize,
+        direction: i32,
+    ) -> bool {
         let Some(displayed_page) = self.current.as_ref().map(|displayed| displayed.key.page) else {
             return page == current_page;
         };
@@ -1003,27 +1160,36 @@ impl PresenterWindow {
                 highlight_end[1],
             ],
         };
-        gpu.queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        gpu.queue
+            .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         let mut points = [LaserPoint::zeroed(); LASER_POINTS];
         for (dst, point) in points.iter_mut().zip(self.laser.iter()) {
             dst.point = [point.x as f32, point.y as f32, 0.0, 0.0];
         }
-        gpu.queue.write_buffer(&gpu.laser_buffer, 0, bytemuck::cast_slice(&points));
+        gpu.queue
+            .write_buffer(&gpu.laser_buffer, 0, bytemuck::cast_slice(&points));
 
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&gpu.device, &self.config);
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Validation => bail!("surface validation error"),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render-encoder"),
-        });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render-encoder"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render-pass"),
@@ -1133,7 +1299,12 @@ impl PresenterWindow {
         set_window_decorations(self.window.as_ref(), self.decorated);
     }
 
-    fn start_modified_window_drag(&self, button: MouseButton, state: ElementState, modifiers: ModifiersState) -> bool {
+    fn start_modified_window_drag(
+        &self,
+        button: MouseButton,
+        state: ElementState,
+        modifiers: ModifiersState,
+    ) -> bool {
         if button != MouseButton::Left || state != ElementState::Pressed {
             return false;
         }
@@ -1156,7 +1327,10 @@ impl PresenterWindow {
         position: PhysicalPosition<f64>,
         modifiers: ModifiersState,
     ) -> bool {
-        if button != MouseButton::Right || state != ElementState::Pressed || !modifiers.control_key() {
+        if button != MouseButton::Right
+            || state != ElementState::Pressed
+            || !modifiers.control_key()
+        {
             return false;
         }
         if self.window.fullscreen().is_some() || self.fullscreen_transition_until.is_some() {
@@ -1172,12 +1346,20 @@ impl PresenterWindow {
         true
     }
 
-    fn update_modified_window_resize(&mut self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> bool {
+    fn update_modified_window_resize(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        page_points: [f32; 2],
+    ) -> bool {
         let Some(drag) = self.resize_drag else {
             return false;
         };
-        let width = (drag.start_size.width as f64 + position.x - drag.start_position.x).round().max(64.0) as u32;
-        let height = (drag.start_size.height as f64 + position.y - drag.start_position.y).round().max(64.0) as u32;
+        let width = (drag.start_size.width as f64 + position.x - drag.start_position.x)
+            .round()
+            .max(64.0) as u32;
+        let height = (drag.start_size.height as f64 + position.y - drag.start_position.y)
+            .round()
+            .max(64.0) as u32;
         let size = PhysicalSize::new(width, height);
         let requested = aspect_corrected_size(size, page_points).unwrap_or(size);
         self.pending_aspect_size = Some(requested);
@@ -1186,7 +1368,10 @@ impl PresenterWindow {
     }
 
     fn finish_modified_window_resize(&mut self, button: MouseButton, state: ElementState) -> bool {
-        if button == MouseButton::Right && state == ElementState::Released && self.resize_drag.is_some() {
+        if button == MouseButton::Right
+            && state == ElementState::Released
+            && self.resize_drag.is_some()
+        {
             self.resize_drag = None;
             return true;
         }
@@ -1272,6 +1457,8 @@ impl App {
     }
 
     fn create_windows(&mut self, event_loop: &dyn ActiveEventLoop) -> Result<()> {
+        set_macos_app_icon();
+
         let initial_size = window_size_for_page(self.page_points);
         let initial_title = self.window_title(false);
         let first = event_loop
@@ -1279,6 +1466,7 @@ impl App {
                 WindowAttributes::default()
                     .with_title(&initial_title)
                     .with_visible(true)
+                    .with_window_icon(app_window_icon())
                     .with_surface_size(initial_size),
             )
             .context("creating initial window")?;
@@ -1391,12 +1579,19 @@ impl App {
         let generation = self.source.generation;
         let direction = self.direction;
         for window in self.windows.values_mut() {
-            window.poll_worker(gpu, generation, self.current_page, self.page_count, direction);
+            window.poll_worker(
+                gpu,
+                generation,
+                self.current_page,
+                self.page_count,
+                direction,
+            );
         }
     }
 
     fn go(&mut self, delta: i32) {
-        let next = (self.current_page as i32 + delta).clamp(0, self.page_count.saturating_sub(1) as i32) as usize;
+        let next = (self.current_page as i32 + delta)
+            .clamp(0, self.page_count.saturating_sub(1) as i32) as usize;
         if next != self.current_page {
             self.current_page = next;
             self.direction = delta.signum();
@@ -1425,7 +1620,12 @@ impl App {
         }
     }
 
-    fn mirror_pointer_button(&mut self, source_id: WindowId, button: MouseButton, state: ElementState) {
+    fn mirror_pointer_button(
+        &mut self,
+        source_id: WindowId,
+        button: MouseButton,
+        state: ElementState,
+    ) {
         let Some(page_position) = self
             .windows
             .get(&source_id)
@@ -1464,7 +1664,9 @@ impl App {
             return;
         }
         self.last_reload_check = Instant::now();
-        let modified = fs::metadata(&self.args.pdf).ok().and_then(|m| m.modified().ok());
+        let modified = fs::metadata(&self.args.pdf)
+            .ok()
+            .and_then(|m| m.modified().ok());
         if modified.is_some() && modified != self.source.modified {
             if let Err(err) = self.reload() {
                 eprintln!("hot reload failed: {err:?}");
@@ -1481,7 +1683,12 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &dyn ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         self.poll_workers();
         let Some(gpu) = self.gpu.as_ref() else {
             return;
@@ -1498,7 +1705,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::SurfaceResized(size) => {
-                let fullscreen_or_transition = window.window.fullscreen().is_some() || window.in_fullscreen_transition();
+                let fullscreen_or_transition =
+                    window.window.fullscreen().is_some() || window.in_fullscreen_transition();
                 if !fullscreen_or_transition {
                     if let Some(pending) = window.pending_aspect_size.take() {
                         if sizes_close(size, pending, 2) {
@@ -1534,7 +1742,12 @@ impl ApplicationHandler for App {
                 }
                 self.mirror_pointer_moved(window_id, position);
             }
-            WindowEvent::PointerButton { button, state, position, .. } => {
+            WindowEvent::PointerButton {
+                button,
+                state,
+                position,
+                ..
+            } => {
                 if let Some(button) = button.mouse_button() {
                     match (button, state) {
                         (MouseButton::Back, ElementState::Pressed) => self.go(-1),
@@ -1544,7 +1757,12 @@ impl ApplicationHandler for App {
                             if window.start_modified_window_drag(button, state, self.modifiers) {
                                 return;
                             }
-                            if window.start_modified_window_resize(button, state, position, self.modifiers) {
+                            if window.start_modified_window_resize(
+                                button,
+                                state,
+                                position,
+                                self.modifiers,
+                            ) {
                                 return;
                             }
                             if window.finish_modified_window_resize(button, state) {
@@ -1566,36 +1784,44 @@ impl ApplicationHandler for App {
                 MouseScrollDelta::PixelDelta(delta) if delta.y > 0.0 => self.go(-1),
                 _ => {}
             },
-            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if event.state.is_pressed() => {
-                match &event.logical_key {
-                    Key::Named(NamedKey::ArrowRight | NamedKey::PageDown | NamedKey::Enter) => self.go(1),
-                    Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp | NamedKey::Backspace) => self.go(-1),
-                    Key::Named(NamedKey::Home) => {
-                        self.current_page = 0;
-                        self.direction = -1;
-                        self.schedule_all();
-                    }
-                    Key::Named(NamedKey::End) => {
-                        self.current_page = self.page_count.saturating_sub(1);
-                        self.direction = 1;
-                        self.schedule_all();
-                    }
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() => {
-                        event_loop.exit();
-                    }
-                    Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
-                    Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
-                    Key::Character(ch) if ch == " " => self.go(1),
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("f") => window.toggle_fullscreen(),
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("d") => window.toggle_decorations(),
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("r") => {
-                        if let Err(err) = self.reload() {
-                            eprintln!("reload failed: {err:?}");
-                        }
-                    }
-                    _ => {}
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if event.state.is_pressed() => match &event.logical_key {
+                Key::Named(NamedKey::ArrowRight | NamedKey::PageDown | NamedKey::Enter) => {
+                    self.go(1)
                 }
-            }
+                Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp | NamedKey::Backspace) => {
+                    self.go(-1)
+                }
+                Key::Named(NamedKey::Home) => {
+                    self.current_page = 0;
+                    self.direction = -1;
+                    self.schedule_all();
+                }
+                Key::Named(NamedKey::End) => {
+                    self.current_page = self.page_count.saturating_sub(1);
+                    self.direction = 1;
+                    self.schedule_all();
+                }
+                Key::Character(ch)
+                    if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() =>
+                {
+                    event_loop.exit();
+                }
+                Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
+                Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
+                Key::Character(ch) if ch == " " => self.go(1),
+                Key::Character(ch) if ch.eq_ignore_ascii_case("f") => window.toggle_fullscreen(),
+                Key::Character(ch) if ch.eq_ignore_ascii_case("d") => window.toggle_decorations(),
+                Key::Character(ch) if ch.eq_ignore_ascii_case("r") => {
+                    if let Err(err) = self.reload() {
+                        eprintln!("reload failed: {err:?}");
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
