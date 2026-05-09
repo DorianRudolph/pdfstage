@@ -342,7 +342,7 @@ impl App {
     }
 
     fn check_hot_reload(&mut self) {
-        if !self.args.hot_reload || self.last_reload_check.elapsed() < Duration::from_millis(500) {
+        if !self.args.hot_reload || self.last_reload_check.elapsed() < Self::HOT_RELOAD_INTERVAL {
             return;
         }
         self.last_reload_check = Instant::now();
@@ -351,6 +351,25 @@ impl App {
             if let Err(err) = self.reload() {
                 eprintln!("hot reload failed: {err:?}");
             }
+        }
+    }
+
+    const HOT_RELOAD_INTERVAL: Duration = Duration::from_millis(500);
+
+    fn next_hot_reload_check(&self) -> Option<Instant> {
+        self.args.hot_reload.then_some(self.last_reload_check + Self::HOT_RELOAD_INTERVAL)
+    }
+
+    fn set_idle_control_flow(
+        &mut self,
+        event_loop: &dyn ActiveEventLoop,
+        zoom_deadline: Option<Instant>,
+    ) {
+        let deadline = [zoom_deadline, self.next_hot_reload_check()].into_iter().flatten().min();
+        if let Some(deadline) = deadline {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 
@@ -678,11 +697,8 @@ impl ApplicationHandler for App {
         }
         self.drain_macos_navigation();
         self.poll_workers();
-        if let Some(deadline) = self.schedule_due_zoom_renders() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
+        let zoom_deadline = self.schedule_due_zoom_renders();
+        self.set_idle_control_flow(event_loop, zoom_deadline);
     }
 
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -692,10 +708,7 @@ impl ApplicationHandler for App {
         self.drain_macos_navigation();
         self.check_hot_reload();
         self.poll_workers();
-        if let Some(deadline) = self.schedule_due_zoom_renders() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
+        let zoom_deadline = self.schedule_due_zoom_renders();
+        self.set_idle_control_flow(event_loop, zoom_deadline);
     }
 }
