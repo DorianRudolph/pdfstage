@@ -40,7 +40,8 @@ pdfpresenter [OPTIONS] <PDF>
 - `f` or `F11`: toggle fullscreen
 - `d`: toggle window decorations
 - `r`: reload PDF
-- `Esc`: quit
+- `Esc`: exit fullscreen
+- `Ctrl` + `Q`: quit
 - Left mouse hold: laser pointer
 - Right mouse drag: highlight
 - Middle mouse hold: magnifier

@@ -1108,6 +1108,16 @@ impl PresenterWindow {
         self.window.request_redraw();
     }
 
+    fn exit_fullscreen(&mut self) {
+        if self.window.fullscreen().is_none() {
+            return;
+        }
+        self.fullscreen_transition_until = Some(Instant::now() + Duration::from_millis(1200));
+        self.pending_aspect_size = None;
+        self.window.set_fullscreen(None);
+        self.window.request_redraw();
+    }
+
     fn in_fullscreen_transition(&mut self) -> bool {
         if let Some(until) = self.fullscreen_transition_until {
             if Instant::now() < until {
@@ -1570,8 +1580,11 @@ impl ApplicationHandler for App {
                         self.direction = 1;
                         self.schedule_all();
                     }
+                    Key::Character(ch) if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() => {
+                        event_loop.exit();
+                    }
                     Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
                     Key::Character(ch) if ch == " " => self.go(1),
                     Key::Character(ch) if ch.eq_ignore_ascii_case("f") => window.toggle_fullscreen(),
                     Key::Character(ch) if ch.eq_ignore_ascii_case("d") => window.toggle_decorations(),
