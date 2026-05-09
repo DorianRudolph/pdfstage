@@ -1599,6 +1599,11 @@ fn image_rect() -> vec4<f32> {
     return vec4<f32>(origin, image);
 }
 
+fn slide_scale() -> f32 {
+    let rect = image_rect();
+    return min(rect.z, rect.w);
+}
+
 fn sample_page(pixel: vec2<f32>) -> vec4<f32> {
     let rect = image_rect();
     let uv = (pixel - rect.xy) / rect.zw;
@@ -1621,6 +1626,9 @@ fn laser_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     if (count <= 0) {
         return color;
     }
+    let scale = slide_scale();
+    let tail_radius = max(2.0, scale * 0.0167);
+    let head_radius = max(3.0, scale * 0.025);
     var alpha = 0.0;
     for (var i = 1; i < 64; i = i + 1) {
         if (i >= count) {
@@ -1630,10 +1638,10 @@ fn laser_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
         let b = laser.points[i].xy;
         let d = dist_to_segment(pixel, a, b);
         let age = f32(i) / max(uniforms.mouse_flags.w, 1.0);
-        alpha = max(alpha, smoothstep(12.0, 0.0, d) * age);
+        alpha = max(alpha, smoothstep(tail_radius, 0.0, d) * age);
     }
     let head = uniforms.mouse_flags.xy;
-    alpha = max(alpha, smoothstep(18.0, 0.0, length(pixel - head)));
+    alpha = max(alpha, smoothstep(head_radius, 0.0, length(pixel - head)));
     let laser_color = vec4<f32>(1.0, 0.02, 0.02, 1.0);
     return mix(color, laser_color, clamp(alpha, 0.0, 0.95));
 }
@@ -1654,16 +1662,20 @@ fn highlight_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
 fn magnifier_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     let center = uniforms.mouse_flags.xy;
     let delta = pixel - center;
-    let radius = 115.0;
+    let scale = slide_scale();
+    let radius = max(32.0, scale * 0.16);
+    let shadow_width = max(6.0, scale * 0.033);
+    let outline_outer = max(1.0, scale * 0.0035);
+    let outline_inner = max(1.0, scale * 0.0042);
     let dist = length(delta);
-    let shadow = smoothstep(radius + 24.0, radius, dist) * 0.25;
+    let shadow = smoothstep(radius + shadow_width, radius, dist) * 0.25;
     let scale_factor = 1.5;
     var out = vec4<f32>(color.rgb * (1.0 - shadow), color.a);
     if (dist < radius) {
         let zoomed = center + delta / scale_factor;
         out = sample_page(zoomed);
     }
-    let outline = smoothstep(radius + 2.5, radius, dist) - smoothstep(radius, radius - 3.0, dist);
+    let outline = smoothstep(radius + outline_outer, radius, dist) - smoothstep(radius, radius - outline_inner, dist);
     out = mix(out, vec4<f32>(0.0, 0.0, 0.0, 1.0), clamp(outline, 0.0, 1.0));
     return out;
 }
