@@ -1194,7 +1194,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pdfpresenter"
+name = "pdfstage"
 version = "0.1.0"
 dependencies = [
  "anyhow",

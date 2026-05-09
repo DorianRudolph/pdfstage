@@ -838,7 +838,7 @@ impl Gpu {
         }))
         .context("requesting WGPU adapter")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("pdfpresenter-device"),
+            label: Some("pdfstage-device"),
             ..Default::default()
         }))
         .context("requesting WGPU device")?;
@@ -917,7 +917,7 @@ impl Gpu {
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pdfpresenter-shader"),
+            label: Some("pdfstage-shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

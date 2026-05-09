@@ -1,4 +1,4 @@
-# pdfpresenter
+# pdfstage
 
 Minimal PDF presentation viewer for Beamer-style talks.
 
@@ -14,17 +14,17 @@ Minimal PDF presentation viewer for Beamer-style talks.
 ## Usage
 
 ```sh
-cargo install --git https://github.com/dorianrudolph/pdfpresenter
+cargo install --git https://github.com/dorianrudolph/pdfstage
 ```
 
 ```sh
-pdfpresenter talk.pdf
+pdfstage talk.pdf
 ```
 
 Options:
 
 ```sh
-pdfpresenter [OPTIONS] <PDF>
+pdfstage [OPTIONS] <PDF>
 
 -m, --mirror             Open a second mirror window
 -r, --hot-reload         Reload when the PDF file changes
