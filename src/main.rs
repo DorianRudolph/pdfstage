@@ -786,6 +786,7 @@ struct PresenterWindow {
     highlight_start: Option<PhysicalPosition<f64>>,
     laser: VecDeque<PhysicalPosition<f64>>,
     resize_drag: Option<ResizeDrag>,
+    mirror: bool,
     decorated: bool,
 }
 
@@ -843,6 +844,7 @@ impl PresenterWindow {
             highlight_start: None,
             laser: VecDeque::new(),
             resize_drag: None,
+            mirror: false,
             decorated: true,
         })
     }
@@ -924,13 +926,7 @@ impl PresenterWindow {
                 }
                 RenderResult::PageSize { generation: msg_generation, page_points, page_count: msg_page_count } => {
                     if msg_generation == generation && msg_page_count == page_count {
-                        self.window.set_title(&format!(
-                            "pdfpresenter - page {}/{} - {:.0}x{:.0}pt",
-                            current_page + 1,
-                            page_count,
-                            page_points[0],
-                            page_points[1]
-                        ));
+                        let _ = page_points;
                     }
                 }
                 RenderResult::Error(err) => eprintln!("{err}"),
@@ -1225,10 +1221,11 @@ impl App {
 
     fn create_windows(&mut self, event_loop: &dyn ActiveEventLoop) -> Result<()> {
         let initial_size = window_size_for_page(self.page_points);
+        let initial_title = self.window_title(false);
         let first = event_loop
             .create_window(
                 WindowAttributes::default()
-                    .with_title("pdfpresenter")
+                    .with_title(&initial_title)
                     .with_visible(true)
                     .with_surface_size(initial_size),
             )
@@ -1260,26 +1257,59 @@ impl App {
             highlight_start: None,
             laser: VecDeque::new(),
             resize_drag: None,
+            mirror: false,
             decorated: true,
         };
-        presenter.window.set_title(&format!("pdfpresenter - page 1/{}", self.page_count));
         let id = presenter.id();
         self.gpu = Some(gpu);
         self.windows.insert(id, presenter);
 
         if self.args.mirror {
             let gpu = self.gpu.as_ref().expect("gpu initialized");
+            let mirror_title = self.window_title(true);
             let mirror = PresenterWindow::new(
                 event_loop,
                 gpu,
-                &format!("pdfpresenter mirror - page 1/{}", self.page_count),
+                &mirror_title,
                 self.args.cache_mib.saturating_mul(1024 * 1024),
                 initial_size,
             )?;
+            let mut mirror = mirror;
+            mirror.mirror = true;
+            mirror.decorated = false;
+            set_window_decorations(mirror.window.as_ref(), false);
             self.windows.insert(mirror.id(), mirror);
         }
         self.schedule_all();
         Ok(())
+    }
+
+    fn window_title(&self, mirror: bool) -> String {
+        let filename = self
+            .args
+            .pdf
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document");
+        let title = format!("{filename} – {}/{}", self.current_page + 1, self.page_count);
+        if mirror {
+            format!("[mirror] {title}")
+        } else {
+            title
+        }
+    }
+
+    fn update_window_titles(&mut self) {
+        let titles = self
+            .windows
+            .values()
+            .map(|window| (window.id(), self.window_title(window.mirror)))
+            .collect::<Vec<_>>();
+        for (id, title) in titles {
+            if let Some(window) = self.windows.get(&id) {
+                window.window.set_title(&title);
+            }
+        }
     }
 
     fn schedule_all(&mut self) {
@@ -1305,8 +1335,8 @@ impl App {
             self.direction = delta.signum();
             for window in self.windows.values_mut() {
                 window.current = None;
-                window.window.set_title(&format!("pdfpresenter - page {}/{}", self.current_page + 1, self.page_count));
             }
+            self.update_window_titles();
             self.schedule_all();
         }
     }
@@ -1360,6 +1390,7 @@ impl App {
         for window in self.windows.values() {
             let _ = window.window.request_surface_size(requested_size.into());
         }
+        self.update_window_titles();
         self.schedule_all();
         Ok(())
     }
