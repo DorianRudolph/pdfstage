@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -378,6 +378,7 @@ enum RenderResult {
 struct RenderWorker {
     tx: Sender<RenderMessage>,
     rx: Receiver<RenderResult>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl RenderWorker {
@@ -389,7 +390,7 @@ impl RenderWorker {
     ) -> Self {
         let (request_tx, request_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("mupdf-render-worker".to_string())
             .spawn(move || {
                 render_worker_loop(device, queue, cache_limit, request_rx, result_tx, proxy)
@@ -398,6 +399,7 @@ impl RenderWorker {
         Self {
             tx: request_tx,
             rx: result_rx,
+            thread: Some(thread),
         }
     }
 
@@ -409,6 +411,9 @@ impl RenderWorker {
 impl Drop for RenderWorker {
     fn drop(&mut self) {
         let _ = self.tx.send(RenderMessage::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -1024,10 +1029,10 @@ struct ResizeDrag {
 }
 
 struct PresenterWindow {
+    worker: RenderWorker,
     surface: wgpu::Surface<'static>,
     window: Box<dyn Window>,
     config: wgpu::SurfaceConfiguration,
-    worker: RenderWorker,
     current: Option<RenderedPage>,
     full_page: Option<RenderedPage>,
     full_page_bind_group: Option<wgpu::BindGroup>,
@@ -1755,12 +1760,13 @@ struct App {
     current_page: usize,
     direction: i32,
     request_counter: u64,
-    gpu: Option<Gpu>,
     windows: HashMap<WindowId, PresenterWindow>,
+    gpu: Option<Gpu>,
     proxy: EventLoopProxy,
     mac_nav_rx: Receiver<i32>,
     last_reload_check: Instant,
     modifiers: ModifiersState,
+    quitting: bool,
 }
 
 impl App {
@@ -1779,12 +1785,13 @@ impl App {
             current_page: 0,
             direction: 1,
             request_counter: 0,
-            gpu: None,
             windows: HashMap::new(),
+            gpu: None,
             proxy,
             mac_nav_rx,
             last_reload_check: Instant::now(),
             modifiers: ModifiersState::empty(),
+            quitting: false,
         })
     }
 
@@ -2082,13 +2089,30 @@ impl App {
             }
         }
     }
+
+    fn request_quit(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.quitting = true;
+        event_loop.set_control_flow(ControlFlow::Poll);
+        self.proxy.wake_up();
+    }
+
+    fn finish_quit(&mut self, event_loop: &dyn ActiveEventLoop) -> bool {
+        if !self.quitting {
+            return false;
+        }
+        self.windows.clear();
+        self.gpu = None;
+        event_loop.exit();
+        true
+    }
 }
 
 impl ApplicationHandler for App {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         if let Err(err) = self.create_windows(event_loop) {
             eprintln!("{err:?}");
-            event_loop.exit();
+            self.quitting = true;
+            self.finish_quit(event_loop);
         }
     }
 
@@ -2098,6 +2122,10 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.quitting {
+            return;
+        }
+
         self.poll_workers();
         let Some(gpu) = self.gpu.as_ref() else {
             return;
@@ -2110,7 +2138,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 self.windows.remove(&window_id);
                 if self.windows.is_empty() {
-                    event_loop.exit();
+                    self.request_quit(event_loop);
                 }
             }
             WindowEvent::SurfaceResized(size) => {
@@ -2324,7 +2352,7 @@ impl ApplicationHandler for App {
                 Key::Character(ch)
                     if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() =>
                 {
-                    event_loop.exit();
+                    self.request_quit(event_loop);
                 }
                 Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
                 Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
@@ -2350,6 +2378,9 @@ impl ApplicationHandler for App {
     }
 
     fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if self.finish_quit(event_loop) {
+            return;
+        }
         self.drain_macos_navigation();
         self.poll_workers();
         if let Some(deadline) = self.schedule_due_zoom_renders() {
@@ -2360,6 +2391,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if self.finish_quit(event_loop) {
+            return;
+        }
         self.drain_macos_navigation();
         self.check_hot_reload();
         self.poll_workers();
