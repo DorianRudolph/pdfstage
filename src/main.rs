@@ -229,6 +229,7 @@ enum RenderResult {
     Ready {
         page: RenderedPage,
         request_id: u64,
+        primary: bool,
     },
     PageSize {
         generation: u64,
@@ -248,12 +249,13 @@ impl RenderWorker {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         cache_limit: u64,
+        proxy: EventLoopProxy,
     ) -> Self {
         let (request_tx, request_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         thread::Builder::new()
             .name("mupdf-render-worker".to_string())
-            .spawn(move || render_worker_loop(device, queue, cache_limit, request_rx, result_tx))
+            .spawn(move || render_worker_loop(device, queue, cache_limit, request_rx, result_tx, proxy))
             .expect("spawn render worker");
         Self {
             tx: request_tx,
@@ -330,6 +332,7 @@ fn render_worker_loop(
     cache_limit: u64,
     rx: Receiver<RenderMessage>,
     tx: Sender<RenderResult>,
+    proxy: EventLoopProxy,
 ) {
     let mut cache = TextureCache::new(cache_limit);
     let mut latest: Option<RenderRequest> = None;
@@ -345,11 +348,8 @@ fn render_worker_loop(
             },
         };
 
-        while let Ok(message) = rx.try_recv() {
-            match message {
-                RenderMessage::Request(next) => latest = Some(next),
-                RenderMessage::Stop => return,
-            }
+        if !drain_render_messages(&rx, &mut latest) {
+            return;
         }
         if latest.is_some() {
             continue;
@@ -359,7 +359,7 @@ fn render_worker_loop(
             document = match Document::from_bytes(&request.source.bytes, "pdf") {
                 Ok(doc) => Some(doc),
                 Err(err) => {
-                    let _ = tx.send(RenderResult::Error(format!("MuPDF open failed: {err}")));
+                    send_render_result(&tx, &proxy, RenderResult::Error(format!("MuPDF open failed: {err}")));
                     None
                 }
             };
@@ -378,7 +378,7 @@ fn render_worker_loop(
 
         if let Ok(page) = document.load_page(request.current_page as i32) {
             if let Ok(bounds) = page.bounds() {
-                let _ = tx.send(RenderResult::PageSize {
+                send_render_result(&tx, &proxy, RenderResult::PageSize {
                     generation: request.source.generation,
                     page_points: [bounds.width().max(1.0), bounds.height().max(1.0)],
                     page_count: request.page_count,
@@ -387,27 +387,31 @@ fn render_worker_loop(
         }
 
         for page_index in prefetch_order(request.current_page, request.page_count, request.direction, request.ahead) {
+            if !drain_render_messages(&rx, &mut latest) {
+                return;
+            }
+            if latest.is_some() {
+                break;
+            }
+
             let key = render_key_for_page(document, request.source.generation, page_index, request.size);
             let Ok(Some(key)) = key else {
                 continue;
             };
+            let primary = page_index == request.current_page;
             if let Some(page) = cache.get(&key) {
-                let _ = tx.send(RenderResult::Ready {
+                send_render_result(&tx, &proxy, RenderResult::Ready {
                     page,
                     request_id: request.request_id,
+                    primary,
                 });
                 continue;
             }
 
-            let stale = match rx.try_recv() {
-                Ok(RenderMessage::Request(next)) => {
-                    latest = Some(next);
-                    true
-                }
-                Ok(RenderMessage::Stop) | Err(mpsc::TryRecvError::Disconnected) => return,
-                Err(mpsc::TryRecvError::Empty) => false,
-            };
-            if stale {
+            if !drain_render_messages(&rx, &mut latest) {
+                return;
+            }
+            if latest.is_some() {
                 break;
             }
 
@@ -418,15 +422,32 @@ fn render_worker_loop(
                         ..page
                     };
                     cache.insert(page.clone());
-                    let _ = tx.send(RenderResult::Ready {
+                    send_render_result(&tx, &proxy, RenderResult::Ready {
                         page,
                         request_id: request.request_id,
+                        primary,
                     });
                 }
                 Err(err) => {
-                    let _ = tx.send(RenderResult::Error(format!("render page {} failed: {err}", page_index + 1)));
+                    send_render_result(&tx, &proxy, RenderResult::Error(format!("render page {} failed: {err}", page_index + 1)));
                 }
             }
+        }
+    }
+}
+
+fn send_render_result(tx: &Sender<RenderResult>, proxy: &EventLoopProxy, result: RenderResult) {
+    if tx.send(result).is_ok() {
+        proxy.wake_up();
+    }
+}
+
+fn drain_render_messages(rx: &Receiver<RenderMessage>, latest: &mut Option<RenderRequest>) -> bool {
+    loop {
+        match rx.try_recv() {
+            Ok(RenderMessage::Request(next)) => *latest = Some(next),
+            Ok(RenderMessage::Stop) | Err(mpsc::TryRecvError::Disconnected) => return false,
+            Err(mpsc::TryRecvError::Empty) => return true,
         }
     }
 }
@@ -778,6 +799,7 @@ struct PresenterWindow {
     current: Option<RenderedPage>,
     bind_group: wgpu::BindGroup,
     wanted_request_id: u64,
+    displayed_request_id: u64,
     surface_size: PhysicalSize<u32>,
     fullscreen_transition_until: Option<Instant>,
     pending_aspect_size: Option<PhysicalSize<u32>>,
@@ -794,6 +816,7 @@ impl PresenterWindow {
     fn new(
         event_loop: &dyn ActiveEventLoop,
         gpu: &Gpu,
+        proxy: EventLoopProxy,
         title: &str,
         cache_limit: u64,
         initial_size: PhysicalSize<u32>,
@@ -826,7 +849,7 @@ impl PresenterWindow {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&gpu.device, &config);
-        let worker = RenderWorker::spawn(gpu.device.clone(), gpu.queue.clone(), cache_limit);
+        let worker = RenderWorker::spawn(gpu.device.clone(), gpu.queue.clone(), cache_limit, proxy);
         let bind_group = create_bind_group(gpu, &gpu.placeholder.view);
         Ok(Self {
             surface,
@@ -836,6 +859,7 @@ impl PresenterWindow {
             current: None,
             bind_group,
             wanted_request_id: 0,
+            displayed_request_id: 0,
             surface_size: size,
             fullscreen_transition_until: None,
             pending_aspect_size: None,
@@ -911,16 +935,21 @@ impl PresenterWindow {
         self.worker.request(request);
     }
 
-    fn poll_worker(&mut self, gpu: &Gpu, generation: u64, current_page: usize, page_count: usize) {
+    fn poll_worker(&mut self, gpu: &Gpu, generation: u64, current_page: usize, page_count: usize, direction: i32) {
         while let Ok(message) = self.worker.rx.try_recv() {
             match message {
-                RenderResult::Ready { page, request_id } => {
-                    if request_id == self.wanted_request_id
-                        && page.key.generation == generation
-                        && page.key.page == current_page
+                RenderResult::Ready { page, request_id, primary } => {
+                    let requested_current_page = primary
+                        && request_id > self.displayed_request_id
+                        && request_id <= self.wanted_request_id
+                        && self.is_page_between_displayed_and_current(page.key.page, current_page, direction);
+                    let latest_current_page = request_id == self.wanted_request_id && page.key.page == current_page;
+                    if page.key.generation == generation
+                        && (requested_current_page || latest_current_page)
                     {
                         self.bind_group = create_bind_group(gpu, &page.view);
                         self.current = Some(page);
+                        self.displayed_request_id = request_id;
                         self.window.request_redraw();
                     }
                 }
@@ -931,6 +960,17 @@ impl PresenterWindow {
                 }
                 RenderResult::Error(err) => eprintln!("{err}"),
             }
+        }
+    }
+
+    fn is_page_between_displayed_and_current(&self, page: usize, current_page: usize, direction: i32) -> bool {
+        let Some(displayed_page) = self.current.as_ref().map(|displayed| displayed.key.page) else {
+            return page == current_page;
+        };
+        if direction < 0 {
+            page <= displayed_page && page >= current_page
+        } else {
+            page >= displayed_page && page <= current_page
         }
     }
 
@@ -1190,13 +1230,14 @@ struct App {
     request_counter: u64,
     gpu: Option<Gpu>,
     windows: HashMap<WindowId, PresenterWindow>,
+    proxy: EventLoopProxy,
     mac_nav_rx: Receiver<i32>,
     last_reload_check: Instant,
     modifiers: ModifiersState,
 }
 
 impl App {
-    fn new(args: Args, mac_nav_rx: Receiver<i32>) -> Result<Self> {
+    fn new(args: Args, proxy: EventLoopProxy, mac_nav_rx: Receiver<i32>) -> Result<Self> {
         let source = PdfSource::load(&args.pdf, 1)?;
         let info = source.info()?;
         if info.page_count == 0 {
@@ -1213,6 +1254,7 @@ impl App {
             request_counter: 0,
             gpu: None,
             windows: HashMap::new(),
+            proxy,
             mac_nav_rx,
             last_reload_check: Instant::now(),
             modifiers: ModifiersState::empty(),
@@ -1239,6 +1281,7 @@ impl App {
             gpu.device.clone(),
             gpu.queue.clone(),
             self.args.cache_mib.saturating_mul(1024 * 1024),
+            self.proxy.clone(),
         );
         let bind_group = create_bind_group(&gpu, &gpu.placeholder.view);
         let presenter = PresenterWindow {
@@ -1249,6 +1292,7 @@ impl App {
             current: None,
             bind_group,
             wanted_request_id: 0,
+            displayed_request_id: 0,
             surface_size: size,
             fullscreen_transition_until: None,
             pending_aspect_size: None,
@@ -1270,6 +1314,7 @@ impl App {
             let mirror = PresenterWindow::new(
                 event_loop,
                 gpu,
+                self.proxy.clone(),
                 &mirror_title,
                 self.args.cache_mib.saturating_mul(1024 * 1024),
                 initial_size,
@@ -1325,6 +1370,18 @@ impl App {
                 ahead: self.args.ahead,
                 request_id,
             });
+        }
+        self.proxy.wake_up();
+    }
+
+    fn poll_workers(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let generation = self.source.generation;
+        let direction = self.direction;
+        for window in self.windows.values_mut() {
+            window.poll_worker(gpu, generation, self.current_page, self.page_count, direction);
         }
     }
 
@@ -1415,6 +1472,7 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        self.poll_workers();
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -1456,6 +1514,7 @@ impl ApplicationHandler for App {
                     eprintln!("{err:?}");
                 }
                 if resized {
+                    window.window.request_redraw();
                     self.schedule_all();
                 }
             }
@@ -1530,18 +1589,13 @@ impl ApplicationHandler for App {
 
     fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
         self.drain_macos_navigation();
+        self.poll_workers();
     }
 
     fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
         self.drain_macos_navigation();
         self.check_hot_reload();
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let generation = self.source.generation;
-        for window in self.windows.values_mut() {
-            window.poll_worker(gpu, generation, self.current_page, self.page_count);
-        }
+        self.poll_workers();
     }
 }
 
@@ -1550,8 +1604,8 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
     let proxy = event_loop.create_proxy();
     let (mac_nav_tx, mac_nav_rx) = mpsc::channel();
-    let _mac_swipe_monitor = install_macos_swipe_monitor(mac_nav_tx, proxy);
-    let app = App::new(args, mac_nav_rx)?;
+    let _mac_swipe_monitor = install_macos_swipe_monitor(mac_nav_tx, proxy.clone());
+    let app = App::new(args, proxy, mac_nav_rx)?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(app)?;
     Ok(())
