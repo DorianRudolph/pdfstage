@@ -21,7 +21,7 @@ use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     monitor::Fullscreen,
     window::{Window, WindowAttributes, WindowId},
 };
@@ -764,6 +764,12 @@ fn make_placeholder_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> Rende
     }
 }
 
+#[derive(Clone, Copy)]
+struct ResizeDrag {
+    start_position: PhysicalPosition<f64>,
+    start_size: PhysicalSize<u32>,
+}
+
 struct PresenterWindow {
     surface: wgpu::Surface<'static>,
     window: Box<dyn Window>,
@@ -779,6 +785,7 @@ struct PresenterWindow {
     mouse_down: Option<MouseButton>,
     highlight_start: Option<PhysicalPosition<f64>>,
     laser: VecDeque<PhysicalPosition<f64>>,
+    resize_drag: Option<ResizeDrag>,
     decorated: bool,
 }
 
@@ -835,6 +842,7 @@ impl PresenterWindow {
             mouse_down: None,
             highlight_start: None,
             laser: VecDeque::new(),
+            resize_drag: None,
             decorated: true,
         })
     }
@@ -1078,6 +1086,66 @@ impl PresenterWindow {
         self.decorated = !self.decorated;
         set_window_decorations(self.window.as_ref(), self.decorated);
     }
+
+    fn start_modified_window_drag(&self, button: MouseButton, state: ElementState, modifiers: ModifiersState) -> bool {
+        if button != MouseButton::Left || state != ElementState::Pressed {
+            return false;
+        }
+        if self.window.fullscreen().is_some() || self.fullscreen_transition_until.is_some() {
+            return false;
+        }
+        if !(modifiers.control_key()) {
+            return false;
+        }
+        if let Err(err) = self.window.drag_window() {
+            eprintln!("window drag failed: {err:?}");
+        }
+        true
+    }
+
+    fn start_modified_window_resize(
+        &mut self,
+        button: MouseButton,
+        state: ElementState,
+        position: PhysicalPosition<f64>,
+        modifiers: ModifiersState,
+    ) -> bool {
+        if button != MouseButton::Right || state != ElementState::Pressed || !modifiers.control_key() {
+            return false;
+        }
+        if self.window.fullscreen().is_some() || self.fullscreen_transition_until.is_some() {
+            return false;
+        }
+        self.resize_drag = Some(ResizeDrag {
+            start_position: position,
+            start_size: self.surface_size,
+        });
+        self.mouse_down = None;
+        self.highlight_start = None;
+        self.laser.clear();
+        true
+    }
+
+    fn update_modified_window_resize(&mut self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> bool {
+        let Some(drag) = self.resize_drag else {
+            return false;
+        };
+        let width = (drag.start_size.width as f64 + position.x - drag.start_position.x).round().max(64.0) as u32;
+        let height = (drag.start_size.height as f64 + position.y - drag.start_position.y).round().max(64.0) as u32;
+        let size = PhysicalSize::new(width, height);
+        let requested = aspect_corrected_size(size, page_points).unwrap_or(size);
+        self.pending_aspect_size = Some(requested);
+        let _ = self.window.request_surface_size(requested.into());
+        true
+    }
+
+    fn finish_modified_window_resize(&mut self, button: MouseButton, state: ElementState) -> bool {
+        if button == MouseButton::Right && state == ElementState::Released && self.resize_drag.is_some() {
+            self.resize_drag = None;
+            return true;
+        }
+        false
+    }
 }
 
 fn create_bind_group(gpu: &Gpu, view: &wgpu::TextureView) -> wgpu::BindGroup {
@@ -1128,6 +1196,7 @@ struct App {
     windows: HashMap<WindowId, PresenterWindow>,
     mac_nav_rx: Receiver<i32>,
     last_reload_check: Instant,
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -1150,6 +1219,7 @@ impl App {
             windows: HashMap::new(),
             mac_nav_rx,
             last_reload_check: Instant::now(),
+            modifiers: ModifiersState::empty(),
         })
     }
 
@@ -1189,6 +1259,7 @@ impl App {
             mouse_down: None,
             highlight_start: None,
             laser: VecDeque::new(),
+            resize_drag: None,
             decorated: true,
         };
         presenter.window.set_title(&format!("pdfpresenter - page 1/{}", self.page_count));
@@ -1361,17 +1432,35 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerMoved { position, .. } => {
+                if window.update_modified_window_resize(position, self.page_points) {
+                    return;
+                }
                 self.mirror_pointer_moved(window_id, position);
             }
-            WindowEvent::PointerButton { button, state, .. } => {
+            WindowEvent::PointerButton { button, state, position, .. } => {
                 if let Some(button) = button.mouse_button() {
                     match (button, state) {
                         (MouseButton::Back, ElementState::Pressed) => self.go(-1),
                         (MouseButton::Forward, ElementState::Pressed) => self.go(1),
                         (MouseButton::Back | MouseButton::Forward, ElementState::Released) => {}
-                        _ => self.mirror_pointer_button(window_id, button, state),
+                        _ => {
+                            if window.start_modified_window_drag(button, state, self.modifiers) {
+                                return;
+                            }
+                            if window.start_modified_window_resize(button, state, position, self.modifiers) {
+                                return;
+                            }
+                            if window.finish_modified_window_resize(button, state) {
+                                return;
+                            }
+                            self.mirror_pointer_moved(window_id, position);
+                            self.mirror_pointer_button(window_id, button, state);
+                        }
                     }
                 }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
             }
             WindowEvent::MouseWheel { delta, .. } => match delta {
                 MouseScrollDelta::LineDelta(_, y) if y < 0.0 => self.go(1),
