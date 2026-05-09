@@ -70,20 +70,17 @@ impl Gpu {
         let surface_format = config.format;
         surface.configure(&device, &config);
 
-        let uniform_buffer = Arc::new(device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let uniform_buffer =
+            Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("uniform-buffer"),
                 contents: bytemuck::bytes_of(&Uniforms::zeroed()),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-        let laser_buffer = Arc::new(
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("laser-buffer"),
-                contents: bytemuck::cast_slice(&[LaserPoint::zeroed(); LASER_POINTS]),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            }),
-        );
+            }));
+        let laser_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("laser-buffer"),
+            contents: bytemuck::cast_slice(&[LaserPoint::zeroed(); LASER_POINTS]),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        }));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pdf-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -192,11 +189,7 @@ impl Gpu {
 fn make_placeholder_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> RenderedPage {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("placeholder-texture"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -207,26 +200,12 @@ fn make_placeholder_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> Rende
     queue.write_texture(
         texture.as_image_copy(),
         &[18, 18, 18, 255],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4),
-            rows_per_image: Some(1),
-        },
-        wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     RenderedPage {
-        key: RenderKey {
-            generation: 0,
-            page: 0,
-            width: 1,
-            height: 1,
-            source: SourceRectKey::FULL,
-        },
+        key: RenderKey { generation: 0, page: 0, width: 1, height: 1, source: SourceRectKey::FULL },
         _texture: Arc::new(texture),
         view: Arc::new(view),
         bytes: 4,
@@ -240,22 +219,13 @@ pub(crate) fn create_bind_group(gpu: &Gpu, view: &wgpu::TextureView) -> wgpu::Bi
         label: Some("bind-group"),
         layout: &gpu.bind_group_layout,
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: gpu.uniform_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(view),
-            },
+            wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(&gpu.sampler),
             },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: gpu.laser_buffer.as_entire_binding(),
-            },
+            wgpu::BindGroupEntry { binding: 3, resource: gpu.laser_buffer.as_entire_binding() },
         ],
     })
 }

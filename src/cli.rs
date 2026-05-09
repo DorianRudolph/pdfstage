@@ -13,11 +13,7 @@ pub(crate) struct Args {
     #[arg(short = 'r', long, help = "Poll the PDF and reload it when it changes")]
     pub(crate) hot_reload: bool,
 
-    #[arg(
-        short = 'f',
-        long,
-        help = "Allow windows to be resized without preserving slide aspect"
-    )]
+    #[arg(short = 'f', long, help = "Allow windows to be resized without preserving slide aspect")]
     pub(crate) free_aspect: bool,
 
     #[arg(

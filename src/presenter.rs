@@ -136,14 +136,7 @@ impl PresenterWindow {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&gpu.device, &config);
-        Ok(Self::from_surface(
-            surface,
-            window,
-            config,
-            gpu,
-            proxy,
-            cache_limit,
-        ))
+        Ok(Self::from_surface(surface, window, config, gpu, proxy, cache_limit))
     }
 
     pub(crate) fn id(&self) -> WindowId {
@@ -176,10 +169,7 @@ impl PresenterWindow {
         }
         if size == self.surface_size {
             #[cfg(debug_assertions)]
-            eprintln!(
-                "[resize] window={:?} surface already configured at {size:?}",
-                self.id()
-            );
+            eprintln!("[resize] window={:?} surface already configured at {size:?}", self.id());
             return;
         }
         #[cfg(debug_assertions)]
@@ -224,10 +214,7 @@ impl PresenterWindow {
         let page_height = page_height.max(1.0);
         let scale = (self.surface_size.width as f64 / page_width)
             .min(self.surface_size.height as f64 / page_height);
-        [
-            (page_width * scale).ceil().max(1.0),
-            (page_height * scale).ceil().max(1.0),
-        ]
+        [(page_width * scale).ceil().max(1.0), (page_height * scale).ceil().max(1.0)]
     }
 
     pub(crate) fn draw_image_size(&self, page_points: [f32; 2]) -> [f64; 2] {
@@ -302,10 +289,7 @@ impl PresenterWindow {
         page_points: [f32; 2],
     ) -> PhysicalPosition<f64> {
         let rect = self.page_image_rect(page_points);
-        PhysicalPosition::new(
-            (position.x - rect[0]) / rect[2],
-            (position.y - rect[1]) / rect[3],
-        )
+        PhysicalPosition::new((position.x - rect[0]) / rect[2], (position.y - rect[1]) / rect[3])
     }
 
     pub(crate) fn position_for_page_unit(
@@ -314,10 +298,7 @@ impl PresenterWindow {
         page_points: [f32; 2],
     ) -> PhysicalPosition<f64> {
         let rect = self.page_image_rect(page_points);
-        PhysicalPosition::new(
-            rect[0] + position.x * rect[2],
-            rect[1] + position.y * rect[3],
-        )
+        PhysicalPosition::new(rect[0] + position.x * rect[2], rect[1] + position.y * rect[3])
     }
 
     pub(crate) fn clamp_pan(&mut self, page_points: [f32; 2]) {
@@ -416,12 +397,7 @@ impl PresenterWindow {
                     && current.key.page == full_page.key.page
             })
             .unwrap_or(true);
-        if same_page
-            && !self
-                .current
-                .as_ref()
-                .is_some_and(|page| page.key.source.is_full())
-        {
+        if same_page && !self.current.as_ref().is_some_and(|page| page.key.source.is_full()) {
             self.bind_group = full_bind_group.clone();
             self.current = Some(full_page);
             self.window.request_redraw();
@@ -451,11 +427,7 @@ impl PresenterWindow {
     ) {
         while let Ok(message) = self.worker.rx.try_recv() {
             match message {
-                RenderResult::Ready {
-                    page,
-                    request_id,
-                    primary,
-                } => {
+                RenderResult::Ready { page, request_id, primary } => {
                     let requested_current_page = primary
                         && request_id > self.displayed_request_id
                         && request_id <= self.wanted_request_id
@@ -549,15 +521,13 @@ impl PresenterWindow {
             zoom_pan: [self.pan[0] as f32, self.pan[1] as f32, 0.0, 0.0],
             source_rect,
         };
-        gpu.queue
-            .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        gpu.queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         let mut points = [LaserPoint::zeroed(); LASER_POINTS];
         for (dst, point) in points.iter_mut().zip(self.laser.iter()) {
             dst.point = [point.x as f32, point.y as f32, 0.0, 0.0];
         }
-        gpu.queue
-            .write_buffer(&gpu.laser_buffer, 0, bytemuck::cast_slice(&points));
+        gpu.queue.write_buffer(&gpu.laser_buffer, 0, bytemuck::cast_slice(&points));
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -571,14 +541,10 @@ impl PresenterWindow {
             }
             wgpu::CurrentSurfaceTexture::Validation => bail!("surface validation error"),
         };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render-encoder"),
-            });
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render-encoder"),
+        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render-pass"),
@@ -632,10 +598,7 @@ impl PresenterWindow {
             }
         }
         if self.mouse_down == Some(MouseButton::Middle) && self.is_zoomed() {
-            panned = self.pan_by(
-                [position.x - previous.x, position.y - previous.y],
-                page_points,
-            );
+            panned = self.pan_by([position.x - previous.x, position.y - previous.y], page_points);
         }
         self.window.request_redraw();
         panned
@@ -738,10 +701,8 @@ impl PresenterWindow {
         if self.window.fullscreen().is_some() || self.fullscreen_transition_until.is_some() {
             return false;
         }
-        self.resize_drag = Some(ResizeDrag {
-            start_position: position,
-            start_size: self.surface_size,
-        });
+        self.resize_drag =
+            Some(ResizeDrag { start_position: position, start_size: self.surface_size });
         self.mouse_down = None;
         self.highlight_start = None;
         self.laser.clear();

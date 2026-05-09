@@ -93,9 +93,8 @@ impl App {
             )
             .context("creating initial window")?;
         let (gpu, surface) = Gpu::new(&first)?;
-        let config = surface
-            .get_configuration()
-            .context("configured initial surface missing config")?;
+        let config =
+            surface.get_configuration().context("configured initial surface missing config")?;
         let presenter = PresenterWindow::from_surface(
             surface,
             first,
@@ -130,18 +129,10 @@ impl App {
     }
 
     fn window_title(&self, mirror: bool) -> String {
-        let filename = self
-            .args
-            .pdf
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("document");
+        let filename =
+            self.args.pdf.file_name().and_then(|name| name.to_str()).unwrap_or("document");
         let title = format!("{filename} – {}/{}", self.current_page + 1, self.page_count);
-        if mirror {
-            format!("[mirror] {title}")
-        } else {
-            title
-        }
+        if mirror { format!("[mirror] {title}") } else { title }
     }
 
     fn update_window_titles(&mut self) {
@@ -158,10 +149,7 @@ impl App {
     }
 
     fn max_texture_dimension_2d(&self) -> u32 {
-        self.gpu
-            .as_ref()
-            .map(|gpu| gpu.max_texture_dimension_2d)
-            .unwrap_or(u32::MAX)
+        self.gpu.as_ref().map(|gpu| gpu.max_texture_dimension_2d).unwrap_or(u32::MAX)
     }
 
     fn schedule_all(&mut self) {
@@ -214,19 +202,13 @@ impl App {
             .windows
             .iter()
             .filter_map(|(id, window)| {
-                window
-                    .pending_zoom_render_at
-                    .filter(|deadline| *deadline <= now)
-                    .map(|_| *id)
+                window.pending_zoom_render_at.filter(|deadline| *deadline <= now).map(|_| *id)
             })
             .collect::<Vec<_>>();
         for id in ids {
             self.schedule_window(id);
         }
-        self.windows
-            .values()
-            .filter_map(|window| window.pending_zoom_render_at)
-            .min()
+        self.windows.values().filter_map(|window| window.pending_zoom_render_at).min()
     }
 
     fn poll_workers(&mut self) {
@@ -236,13 +218,7 @@ impl App {
         let generation = self.source.generation;
         let direction = self.direction;
         for window in self.windows.values_mut() {
-            window.poll_worker(
-                gpu,
-                generation,
-                self.current_page,
-                self.page_count,
-                direction,
-            );
+            window.poll_worker(gpu, generation, self.current_page, self.page_count, direction);
         }
     }
 
@@ -338,9 +314,7 @@ impl App {
             return;
         }
         self.last_reload_check = Instant::now();
-        let modified = fs::metadata(&self.args.pdf)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let modified = fs::metadata(&self.args.pdf).ok().and_then(|m| m.modified().ok());
         if modified.is_some() && modified != self.source.modified {
             if let Err(err) = self.reload() {
                 eprintln!("hot reload failed: {err:?}");
@@ -497,12 +471,7 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::PointerButton {
-                button,
-                state,
-                position,
-                ..
-            } => {
+            WindowEvent::PointerButton { button, state, position, .. } => {
                 if let Some(button) = button.mouse_button() {
                     match (button, state) {
                         (MouseButton::Back, ElementState::Pressed) => self.go(-1),
@@ -615,64 +584,68 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput {
-                event,
-                is_synthetic: false,
-                ..
-            } if event.state.is_pressed() => match &event.logical_key {
-                Key::Named(NamedKey::ArrowRight | NamedKey::PageDown | NamedKey::Enter) => {
-                    self.go(1)
-                }
-                Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp | NamedKey::Backspace) => {
-                    self.go(-1)
-                }
-                Key::Named(NamedKey::Home) => {
-                    if self.current_page != 0 {
-                        self.current_page = 0;
-                        self.direction = -1;
-                        for window in self.windows.values_mut() {
-                            window.reset_zoom_for_slide_change();
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
+                if event.state.is_pressed() =>
+            {
+                match &event.logical_key {
+                    Key::Named(NamedKey::ArrowRight | NamedKey::PageDown | NamedKey::Enter) => {
+                        self.go(1)
+                    }
+                    Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp | NamedKey::Backspace) => {
+                        self.go(-1)
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        if self.current_page != 0 {
+                            self.current_page = 0;
+                            self.direction = -1;
+                            for window in self.windows.values_mut() {
+                                window.reset_zoom_for_slide_change();
+                            }
+                            self.update_window_titles();
+                            self.schedule_all();
                         }
-                        self.update_window_titles();
-                        self.schedule_all();
                     }
-                }
-                Key::Named(NamedKey::End) => {
-                    let last = self.page_count.saturating_sub(1);
-                    if self.current_page != last {
-                        self.current_page = last;
-                        self.direction = 1;
-                        for window in self.windows.values_mut() {
-                            window.reset_zoom_for_slide_change();
+                    Key::Named(NamedKey::End) => {
+                        let last = self.page_count.saturating_sub(1);
+                        if self.current_page != last {
+                            self.current_page = last;
+                            self.direction = 1;
+                            for window in self.windows.values_mut() {
+                                window.reset_zoom_for_slide_change();
+                            }
+                            self.update_window_titles();
+                            self.schedule_all();
                         }
-                        self.update_window_titles();
-                        self.schedule_all();
                     }
-                }
-                Key::Character(ch)
-                    if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() =>
-                {
-                    self.request_quit(event_loop);
-                }
-                Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
-                Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
-                Key::Character(ch) if ch == " " => self.go(1),
-                Key::Character(ch) if ch == "0" => {
-                    if window.reset_zoom(self.page_points) {
-                        window.use_full_page_if_available();
-                        window.finish_zoom_render();
-                        self.proxy.wake_up();
+                    Key::Character(ch)
+                        if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() =>
+                    {
+                        self.request_quit(event_loop);
                     }
-                }
-                Key::Character(ch) if ch.eq_ignore_ascii_case("f") => window.toggle_fullscreen(),
-                Key::Character(ch) if ch.eq_ignore_ascii_case("d") => window.toggle_decorations(),
-                Key::Character(ch) if ch.eq_ignore_ascii_case("r") => {
-                    if let Err(err) = self.reload() {
-                        eprintln!("reload failed: {err:?}");
+                    Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
+                    Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
+                    Key::Character(ch) if ch == " " => self.go(1),
+                    Key::Character(ch) if ch == "0" => {
+                        if window.reset_zoom(self.page_points) {
+                            window.use_full_page_if_available();
+                            window.finish_zoom_render();
+                            self.proxy.wake_up();
+                        }
                     }
+                    Key::Character(ch) if ch.eq_ignore_ascii_case("f") => {
+                        window.toggle_fullscreen()
+                    }
+                    Key::Character(ch) if ch.eq_ignore_ascii_case("d") => {
+                        window.toggle_decorations()
+                    }
+                    Key::Character(ch) if ch.eq_ignore_ascii_case("r") => {
+                        if let Err(err) = self.reload() {
+                            eprintln!("reload failed: {err:?}");
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }

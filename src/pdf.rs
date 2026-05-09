@@ -17,11 +17,7 @@ impl PdfSource {
     pub(crate) fn load(path: &PathBuf, generation: u64) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let modified = fs::metadata(path).ok().and_then(|m| m.modified().ok());
-        Ok(Self {
-            bytes: Arc::new(bytes),
-            generation,
-            modified,
-        })
+        Ok(Self { bytes: Arc::new(bytes), generation, modified })
     }
 
     pub(crate) fn info(&self) -> Result<PdfInfo> {
@@ -34,10 +30,7 @@ impl PdfSource {
             let bounds = page.bounds()?;
             [bounds.width().max(1.0), bounds.height().max(1.0)]
         };
-        Ok(PdfInfo {
-            page_count,
-            page_points,
-        })
+        Ok(PdfInfo { page_count, page_points })
     }
 }
 
@@ -75,11 +68,7 @@ pub(crate) fn aspect_corrected_size(
 
     let keep_width_delta = keep_width.height.abs_diff(size.height);
     let keep_height_delta = keep_height.width.abs_diff(size.width);
-    let corrected = if keep_width_delta <= keep_height_delta {
-        keep_width
-    } else {
-        keep_height
-    };
+    let corrected = if keep_width_delta <= keep_height_delta { keep_width } else { keep_height };
     let corrected_delta = keep_width_delta.min(keep_height_delta);
 
     // Some window systems round requested surface sizes to nearby physical pixels.
@@ -114,10 +103,7 @@ mod tests {
 
     #[test]
     fn aspect_corrected_size_accepts_single_pixel_rounding() {
-        assert_eq!(
-            aspect_corrected_size(PhysicalSize::new(2024, 1140), [16.0, 9.0]),
-            None
-        );
+        assert_eq!(aspect_corrected_size(PhysicalSize::new(2024, 1140), [16.0, 9.0]), None);
     }
 
     #[test]

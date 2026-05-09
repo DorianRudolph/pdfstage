@@ -53,10 +53,7 @@ pub(crate) fn install_macos_swipe_monitor(
     let monitor = unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::Swipe, &block)
     };
-    monitor.map(|monitor| MacSwipeMonitor {
-        monitor,
-        _block: block,
-    })
+    monitor.map(|monitor| MacSwipeMonitor { monitor, _block: block })
 }
 
 #[cfg(not(target_os = "macos"))]

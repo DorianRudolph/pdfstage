@@ -31,12 +31,8 @@ pub(crate) struct SourceRectKey {
 }
 
 impl SourceRectKey {
-    pub(crate) const FULL: Self = Self {
-        x0: 0,
-        y0: 0,
-        x1: SOURCE_RECT_SCALE as u32,
-        y1: SOURCE_RECT_SCALE as u32,
-    };
+    pub(crate) const FULL: Self =
+        Self { x0: 0, y0: 0, x1: SOURCE_RECT_SCALE as u32, y1: SOURCE_RECT_SCALE as u32 };
 
     pub(crate) fn from_unit_rect(rect: [f64; 4]) -> Self {
         let x0 = rect[0].clamp(0.0, 1.0);
@@ -93,16 +89,8 @@ enum RenderMessage {
 }
 
 pub(crate) enum RenderResult {
-    Ready {
-        page: RenderedPage,
-        request_id: u64,
-        primary: bool,
-    },
-    PageSize {
-        generation: u64,
-        page_points: [f32; 2],
-        page_count: usize,
-    },
+    Ready { page: RenderedPage, request_id: u64, primary: bool },
+    PageSize { generation: u64, page_points: [f32; 2], page_count: usize },
     Error(String),
 }
 
@@ -127,11 +115,7 @@ impl RenderWorker {
                 render_worker_loop(device, queue, cache_limit, request_rx, result_tx, proxy)
             })
             .expect("spawn render worker");
-        Self {
-            tx: request_tx,
-            rx: result_rx,
-            thread: Some(thread),
-        }
+        Self { tx: request_tx, rx: result_rx, thread: Some(thread) }
     }
 
     pub(crate) fn request(&self, request: RenderRequest) {
@@ -157,12 +141,7 @@ struct TextureCache {
 
 impl TextureCache {
     fn new(limit: u64) -> Self {
-        Self {
-            map: HashMap::new(),
-            lru: VecDeque::new(),
-            bytes: 0,
-            limit,
-        }
+        Self { map: HashMap::new(), lru: VecDeque::new(), bytes: 0, limit }
     }
 
     fn get(&mut self, key: &RenderKey) -> Option<RenderedPage> {
@@ -242,12 +221,8 @@ fn render_worker_loop(
                 }
             };
             document_generation = request.source.generation;
-            cache
-                .map
-                .retain(|key, _| key.generation == document_generation);
-            cache
-                .lru
-                .retain(|key| key.generation == document_generation);
+            cache.map.retain(|key, _| key.generation == document_generation);
+            cache.lru.retain(|key| key.generation == document_generation);
             cache.bytes = cache.map.values().map(|p| p.bytes).sum();
         }
 
@@ -272,17 +247,10 @@ fn render_worker_loop(
             }
         }
 
-        let ahead = if request.source_rect.is_full() {
-            request.ahead
-        } else {
-            0
-        };
-        for page_index in prefetch_order(
-            request.current_page,
-            request.page_count,
-            request.direction,
-            ahead,
-        ) {
+        let ahead = if request.source_rect.is_full() { request.ahead } else { 0 };
+        for page_index in
+            prefetch_order(request.current_page, request.page_count, request.direction, ahead)
+        {
             if !drain_render_messages(&rx, &mut latest) {
                 return;
             }
@@ -305,11 +273,7 @@ fn render_worker_loop(
                 send_render_result(
                     &tx,
                     &proxy,
-                    RenderResult::Ready {
-                        page,
-                        request_id: request.request_id,
-                        primary,
-                    },
+                    RenderResult::Ready { page, request_id: request.request_id, primary },
                 );
                 continue;
             }
@@ -331,11 +295,7 @@ fn render_worker_loop(
                     send_render_result(
                         &tx,
                         &proxy,
-                        RenderResult::Ready {
-                            page,
-                            request_id: request.request_id,
-                            primary,
-                        },
+                        RenderResult::Ready { page, request_id: request.request_id, primary },
                     );
                 }
                 Err(err) => {
@@ -418,13 +378,7 @@ fn render_key_for_page(
         (surface_size.width as f32 / source_width).min(surface_size.height as f32 / source_height);
     let width = (source_width * scale).ceil().max(1.0) as u32;
     let height = (source_height * scale).ceil().max(1.0) as u32;
-    Ok(Some(RenderKey {
-        generation,
-        page,
-        width,
-        height,
-        source: source_rect,
-    }))
+    Ok(Some(RenderKey { generation, page, width, height, source: source_rect }))
 }
 
 fn render_page_to_texture(
@@ -452,14 +406,7 @@ fn render_page_to_texture(
             false,
         )?;
         pixmap.clear_with(255)?;
-        let matrix = Matrix::new(
-            scale,
-            0.0,
-            0.0,
-            scale,
-            -source_x0 * scale,
-            -source_y0 * scale,
-        );
+        let matrix = Matrix::new(scale, 0.0, 0.0, scale, -source_x0 * scale, -source_y0 * scale);
         let clip = IRect::new(0, 0, key.width as i32, key.height as i32);
         let draw_device = MupdfDevice::from_pixmap_with_clip(&pixmap, clip)?;
         page.run(&draw_device, &matrix)?;
@@ -473,11 +420,7 @@ fn render_page_to_texture(
     }
 
     let mut rgba = vec![255_u8; (width * height * 4) as usize];
-    for (src, dst) in pixmap
-        .samples()
-        .chunks_exact(n)
-        .zip(rgba.chunks_exact_mut(4))
-    {
+    for (src, dst) in pixmap.samples().chunks_exact(n).zip(rgba.chunks_exact_mut(4)) {
         dst[0] = src[0];
         dst[1] = src[1];
         dst[2] = src[2];
@@ -486,11 +429,7 @@ fn render_page_to_texture(
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pdf-page-texture"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -511,11 +450,7 @@ fn render_page_to_texture(
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     Ok(RenderedPage {
