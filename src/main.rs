@@ -1333,9 +1333,6 @@ impl App {
         if next != self.current_page {
             self.current_page = next;
             self.direction = delta.signum();
-            for window in self.windows.values_mut() {
-                window.current = None;
-            }
             self.update_window_titles();
             self.schedule_all();
         }
