@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use mupdf::Document;
 use winit::dpi::PhysicalSize;
 
+const ASPECT_CORRECTION_PIXEL_TOLERANCE: u32 = 1;
+
 #[derive(Clone)]
 pub(crate) struct PdfSource {
     pub(crate) bytes: Arc<Vec<u8>>,
@@ -78,8 +80,11 @@ pub(crate) fn aspect_corrected_size(
     } else {
         keep_height
     };
+    let corrected_delta = keep_width_delta.min(keep_height_delta);
 
-    (size != corrected).then_some(corrected)
+    // Some window systems round requested surface sizes to nearby physical pixels.
+    // Chasing a one-pixel correction can feed back into another resize event.
+    (size != corrected && corrected_delta > ASPECT_CORRECTION_PIXEL_TOLERANCE).then_some(corrected)
 }
 
 #[cfg(target_os = "macos")]
@@ -100,5 +105,26 @@ pub(crate) fn scroll_navigation_delta(x: f64, y: f64) -> Option<i32> {
         Some(if y < 0.0 { 1 } else { -1 })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aspect_corrected_size_accepts_single_pixel_rounding() {
+        assert_eq!(
+            aspect_corrected_size(PhysicalSize::new(2024, 1140), [16.0, 9.0]),
+            None
+        );
+    }
+
+    #[test]
+    fn aspect_corrected_size_corrects_larger_offsets() {
+        assert_eq!(
+            aspect_corrected_size(PhysicalSize::new(2024, 1200), [16.0, 9.0]),
+            Some(PhysicalSize::new(2024, 1139))
+        );
     }
 }
