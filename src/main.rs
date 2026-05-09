@@ -866,6 +866,36 @@ impl PresenterWindow {
         true
     }
 
+    fn page_image_size(&self, page_points: [f32; 2]) -> [f64; 2] {
+        let page_width = page_points[0].max(1.0) as f64;
+        let page_height = page_points[1].max(1.0) as f64;
+        let scale = (self.surface_size.width as f64 / page_width).min(self.surface_size.height as f64 / page_height);
+        [
+            (page_width * scale).round().max(1.0),
+            (page_height * scale).round().max(1.0),
+        ]
+    }
+
+    fn page_image_rect(&self, page_points: [f32; 2]) -> [f64; 4] {
+        let image = self.page_image_size(page_points);
+        [
+            ((self.surface_size.width as f64 - image[0]) * 0.5).floor(),
+            ((self.surface_size.height as f64 - image[1]) * 0.5).floor(),
+            image[0],
+            image[1],
+        ]
+    }
+
+    fn page_unit_at(&self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> PhysicalPosition<f64> {
+        let rect = self.page_image_rect(page_points);
+        PhysicalPosition::new((position.x - rect[0]) / rect[2], (position.y - rect[1]) / rect[3])
+    }
+
+    fn position_for_page_unit(&self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> PhysicalPosition<f64> {
+        let rect = self.page_image_rect(page_points);
+        PhysicalPosition::new(rect[0] + position.x * rect[2], rect[1] + position.y * rect[3])
+    }
+
     fn set_page(&mut self, request: RenderRequest) {
         self.wanted_request_id = request.request_id;
         self.worker.request(request);
@@ -1216,6 +1246,34 @@ impl App {
         }
     }
 
+    fn mirror_pointer_moved(&mut self, source_id: WindowId, position: PhysicalPosition<f64>) {
+        let Some(page_position) = self
+            .windows
+            .get(&source_id)
+            .map(|window| window.page_unit_at(position, self.page_points))
+        else {
+            return;
+        };
+        for window in self.windows.values_mut() {
+            let position = window.position_for_page_unit(page_position, self.page_points);
+            window.pointer_moved(position);
+        }
+    }
+
+    fn mirror_pointer_button(&mut self, source_id: WindowId, button: MouseButton, state: ElementState) {
+        let Some(page_position) = self
+            .windows
+            .get(&source_id)
+            .map(|window| window.page_unit_at(window.mouse, self.page_points))
+        else {
+            return;
+        };
+        for window in self.windows.values_mut() {
+            window.mouse = window.position_for_page_unit(page_position, self.page_points);
+            window.pointer_button(button, state);
+        }
+    }
+
     fn reload(&mut self) -> Result<()> {
         let generation = self.generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
         let source = PdfSource::load(&self.args.pdf, generation)?;
@@ -1302,14 +1360,16 @@ impl ApplicationHandler for App {
                     self.schedule_all();
                 }
             }
-            WindowEvent::PointerMoved { position, .. } => window.pointer_moved(position),
+            WindowEvent::PointerMoved { position, .. } => {
+                self.mirror_pointer_moved(window_id, position);
+            }
             WindowEvent::PointerButton { button, state, .. } => {
                 if let Some(button) = button.mouse_button() {
                     match (button, state) {
                         (MouseButton::Back, ElementState::Pressed) => self.go(-1),
                         (MouseButton::Forward, ElementState::Pressed) => self.go(1),
                         (MouseButton::Back | MouseButton::Forward, ElementState::Released) => {}
-                        _ => window.pointer_button(button, state),
+                        _ => self.mirror_pointer_button(window_id, button, state),
                     }
                 }
             }
@@ -1477,9 +1537,10 @@ fn magnifier_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     let radius = 115.0;
     let dist = length(delta);
     let shadow = smoothstep(radius + 24.0, radius, dist) * 0.25;
+    let scale_factor = 1.5;
     var out = vec4<f32>(color.rgb * (1.0 - shadow), color.a);
     if (dist < radius) {
-        let zoomed = center + delta / 2.2;
+        let zoomed = center + delta / scale_factor;
         out = sample_page(zoomed);
     }
     let outline = smoothstep(radius + 2.5, radius, dist) - smoothstep(radius, radius - 3.0, dist);
