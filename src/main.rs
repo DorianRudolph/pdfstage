@@ -272,6 +272,16 @@ fn swipe_navigation_delta(x: f64, y: f64) -> Option<i32> {
     }
 }
 
+fn scroll_navigation_delta(x: f64, y: f64) -> Option<i32> {
+    if x.abs() > y.abs() && x.abs() > 0.0 {
+        Some(if x < 0.0 { 1 } else { -1 })
+    } else if y.abs() > 0.0 {
+        Some(if y < 0.0 { 1 } else { -1 })
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct RenderKey {
     generation: u64,
@@ -2196,12 +2206,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.modifiers.shift_key() {
-                    match delta {
-                        MouseScrollDelta::LineDelta(_, y) if y < 0.0 => self.go(1),
-                        MouseScrollDelta::LineDelta(_, y) if y > 0.0 => self.go(-1),
-                        MouseScrollDelta::PixelDelta(delta) if delta.y < 0.0 => self.go(1),
-                        MouseScrollDelta::PixelDelta(delta) if delta.y > 0.0 => self.go(-1),
-                        _ => {}
+                    let delta = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            scroll_navigation_delta(x as f64, y as f64)
+                        }
+                        MouseScrollDelta::PixelDelta(delta) => {
+                            scroll_navigation_delta(delta.x, delta.y)
+                        }
+                    };
+                    if let Some(delta) = delta {
+                        self.go(delta);
                     }
                 } else {
                     match delta {
