@@ -325,7 +325,7 @@ impl App {
         if !self.args.free_aspect {
             let requested_size = window_size_for_page(self.page_points);
             for window in self.windows.values() {
-                let _ = window.window.request_surface_size(requested_size.into());
+                let _ = window.request_surface_size(requested_size, "reload-aspect-reset");
             }
         }
         self.update_window_titles();
@@ -402,22 +402,60 @@ impl ApplicationHandler for App {
             WindowEvent::SurfaceResized(size) => {
                 let fullscreen_or_transition =
                     window.window.fullscreen().is_some() || window.in_fullscreen_transition();
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[resize] window={window_id:?} SurfaceResized size={size:?} configured={:?} pending={:?} free_aspect={} fullscreen_or_transition={fullscreen_or_transition}",
+                    window.surface_size, window.pending_aspect_size, self.args.free_aspect
+                );
                 if !fullscreen_or_transition && !self.args.free_aspect {
                     if let Some(pending) = window.pending_aspect_size.take() {
                         if size == pending {
+                            #[cfg(debug_assertions)]
+                            eprintln!(
+                                "[resize] window={window_id:?} pending aspect size accepted: {size:?}"
+                            );
+                            window.last_aspect_request = None;
                             window.resize(gpu, size);
                             self.schedule_all();
                             return;
                         }
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "[resize] window={window_id:?} pending aspect size {pending:?} did not match event size {size:?}"
+                        );
                     }
                     if let Some(corrected) = aspect_corrected_size(size, self.page_points) {
-                        window.pending_aspect_size = Some(corrected);
-                        let _ = window.window.request_surface_size(corrected.into());
+                        let repeated_request =
+                            window.last_aspect_request == Some((size, corrected));
+                        window.resize(gpu, size);
+                        if repeated_request {
+                            #[cfg(debug_assertions)]
+                            eprintln!(
+                                "[resize] window={window_id:?} suppressing repeated aspect request for size={size:?} corrected={corrected:?}"
+                            );
+                        } else {
+                            match window.request_surface_size(corrected, "aspect-correction") {
+                                Some(applied) => {
+                                    window.pending_aspect_size = None;
+                                    window.last_aspect_request = Some((size, corrected));
+                                    #[cfg(debug_assertions)]
+                                    eprintln!(
+                                        "[resize] window={window_id:?} aspect request returned {applied:?}; keeping SurfaceResized size {size:?} until compositor reports another size"
+                                    );
+                                }
+                                None => {
+                                    window.pending_aspect_size = Some(corrected);
+                                    window.last_aspect_request = None;
+                                }
+                            }
+                        }
+                        self.schedule_all();
                         return;
                     }
                 } else {
                     window.pending_aspect_size = None;
                 }
+                window.last_aspect_request = None;
                 window.resize(gpu, size);
                 self.schedule_all();
             }
@@ -433,11 +471,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerMoved { position, .. } => {
-                if window.update_modified_window_resize(
+                if let Some(resized) = window.update_modified_window_resize(
+                    gpu,
                     position,
                     self.page_points,
                     !self.args.free_aspect,
                 ) {
+                    if resized {
+                        self.schedule_all();
+                    }
                     return;
                 }
                 if self.mirror_pointer_moved(window_id, position) {

@@ -56,6 +56,7 @@ pub(crate) struct PresenterWindow {
     pub(crate) zoom: f64,
     pub(crate) pan: [f64; 2],
     pub(crate) pending_zoom_render_at: Option<Instant>,
+    pub(crate) last_aspect_request: Option<(PhysicalSize<u32>, PhysicalSize<u32>)>,
 }
 
 impl PresenterWindow {
@@ -94,6 +95,7 @@ impl PresenterWindow {
             zoom: 1.0,
             pan: [0.0, 0.0],
             pending_zoom_render_at: None,
+            last_aspect_request: None,
         }
     }
 
@@ -148,10 +150,44 @@ impl PresenterWindow {
         self.window.id()
     }
 
+    pub(crate) fn request_surface_size(
+        &self,
+        requested: PhysicalSize<u32>,
+        reason: &str,
+    ) -> Option<PhysicalSize<u32>> {
+        let before = self.window.surface_size();
+        let result = self.window.request_surface_size(requested.into());
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[resize] window={:?} request_surface_size reason={reason} before={before:?} requested={requested:?} result={result:?}",
+            self.id()
+        );
+        result
+    }
+
     pub(crate) fn resize(&mut self, gpu: &Gpu, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[resize] window={:?} ignoring zero-sized surface resize: {size:?}",
+                self.id()
+            );
             return;
         }
+        if size == self.surface_size {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[resize] window={:?} surface already configured at {size:?}",
+                self.id()
+            );
+            return;
+        }
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[resize] window={:?} configure surface from {:?} to {size:?}",
+            self.id(),
+            self.surface_size
+        );
         self.surface_size = size;
         self.config.width = size.width;
         self.config.height = size.height;
@@ -166,6 +202,13 @@ impl PresenterWindow {
         if size == self.surface_size {
             return false;
         }
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[resize] window={:?} sync_surface_size observed {:?} while configured {:?}",
+            self.id(),
+            size,
+            self.surface_size
+        );
         self.pending_aspect_size = None;
         self.resize(gpu, size);
         true
@@ -707,12 +750,13 @@ impl PresenterWindow {
 
     pub(crate) fn update_modified_window_resize(
         &mut self,
+        gpu: &Gpu,
         position: PhysicalPosition<f64>,
         page_points: [f32; 2],
         preserve_aspect: bool,
-    ) -> bool {
+    ) -> Option<bool> {
         let Some(drag) = self.resize_drag else {
-            return false;
+            return None;
         };
         let width = (drag.start_size.width as f64 + position.x - drag.start_position.x)
             .round()
@@ -726,9 +770,20 @@ impl PresenterWindow {
         } else {
             size
         };
-        self.pending_aspect_size = Some(requested);
-        let _ = self.window.request_surface_size(requested.into());
-        true
+        match self.request_surface_size(requested, "modified-window-resize") {
+            Some(applied) => {
+                self.pending_aspect_size = None;
+                self.last_aspect_request = None;
+                let changed = applied != self.surface_size;
+                self.resize(gpu, applied);
+                Some(changed)
+            }
+            None => {
+                self.pending_aspect_size = Some(requested);
+                self.last_aspect_request = None;
+                Some(false)
+            }
+        }
     }
 
     pub(crate) fn finish_modified_window_resize(
