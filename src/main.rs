@@ -14,12 +14,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, Zeroable};
 use clap::Parser;
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::{Colorspace, Device as MupdfDevice, Document, IRect, Matrix, Pixmap};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     icon::{Icon, RgbaIcon},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -44,6 +44,13 @@ const FLAG_HIGHLIGHT: u32 = 2;
 const FLAG_MAGNIFY: u32 = 4;
 const APP_ICON_SIZE: u32 = 256;
 const APP_ICON_RGBA: &[u8] = include_bytes!("../assets/app-icon.rgba");
+const MIN_ZOOM: f64 = 0.25;
+const MAX_ZOOM: f64 = 8.0;
+const ZOOM_EPSILON: f64 = 0.001;
+const WHEEL_ZOOM_STEP: f64 = 1.15;
+const PIXEL_ZOOM_SPEED: f64 = 0.0025;
+const ZOOM_RENDER_DEBOUNCE: Duration = Duration::from_millis(300);
+const SOURCE_RECT_SCALE: f64 = 1_000_000.0;
 #[cfg(target_os = "macos")]
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 #[cfg(target_os = "macos")]
@@ -243,11 +250,7 @@ fn aspect_corrected_size(
         keep_height
     };
 
-    (!sizes_close(size, corrected, 2)).then_some(corrected)
-}
-
-fn sizes_close(a: PhysicalSize<u32>, b: PhysicalSize<u32>, tolerance: u32) -> bool {
-    a.width.abs_diff(b.width) <= tolerance && a.height.abs_diff(b.height) <= tolerance
+    (size != corrected).then_some(corrected)
 }
 
 fn swipe_navigation_delta(x: f64, y: f64) -> Option<i32> {
@@ -266,6 +269,50 @@ struct RenderKey {
     page: usize,
     width: u32,
     height: u32,
+    source: SourceRectKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SourceRectKey {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl SourceRectKey {
+    const FULL: Self = Self {
+        x0: 0,
+        y0: 0,
+        x1: SOURCE_RECT_SCALE as u32,
+        y1: SOURCE_RECT_SCALE as u32,
+    };
+
+    fn from_unit_rect(rect: [f64; 4]) -> Self {
+        let x0 = rect[0].clamp(0.0, 1.0);
+        let y0 = rect[1].clamp(0.0, 1.0);
+        let x1 = rect[2].clamp(x0, 1.0);
+        let y1 = rect[3].clamp(y0, 1.0);
+        Self {
+            x0: (x0 * SOURCE_RECT_SCALE).floor() as u32,
+            y0: (y0 * SOURCE_RECT_SCALE).floor() as u32,
+            x1: (x1 * SOURCE_RECT_SCALE).ceil() as u32,
+            y1: (y1 * SOURCE_RECT_SCALE).ceil() as u32,
+        }
+    }
+
+    fn as_unit_rect(self) -> [f32; 4] {
+        [
+            self.x0 as f32 / SOURCE_RECT_SCALE as f32,
+            self.y0 as f32 / SOURCE_RECT_SCALE as f32,
+            self.x1 as f32 / SOURCE_RECT_SCALE as f32,
+            self.y1 as f32 / SOURCE_RECT_SCALE as f32,
+        ]
+    }
+
+    fn is_full(self) -> bool {
+        self == Self::FULL
+    }
 }
 
 #[derive(Clone)]
@@ -274,6 +321,8 @@ struct RenderedPage {
     _texture: Arc<wgpu::Texture>,
     view: Arc<wgpu::TextureView>,
     bytes: u64,
+    source_rect: [f32; 4],
+    page_points: [f32; 2],
 }
 
 #[derive(Clone)]
@@ -282,6 +331,7 @@ struct RenderRequest {
     current_page: usize,
     page_count: usize,
     size: PhysicalSize<u32>,
+    source_rect: SourceRectKey,
     direction: i32,
     ahead: i32,
     request_id: u64,
@@ -467,11 +517,16 @@ fn render_worker_loop(
             }
         }
 
+        let ahead = if request.source_rect.is_full() {
+            request.ahead
+        } else {
+            0
+        };
         for page_index in prefetch_order(
             request.current_page,
             request.page_count,
             request.direction,
-            request.ahead,
+            ahead,
         ) {
             if !drain_render_messages(&rx, &mut latest) {
                 return;
@@ -485,6 +540,7 @@ fn render_worker_loop(
                 request.source.generation,
                 page_index,
                 request.size,
+                request.source_rect,
             );
             let Ok(Some(key)) = key else {
                 continue;
@@ -594,20 +650,25 @@ fn render_key_for_page(
     generation: u64,
     page: usize,
     surface_size: PhysicalSize<u32>,
+    source_rect: SourceRectKey,
 ) -> Result<Option<RenderKey>> {
     let loaded_page = document.load_page(page as i32)?;
     let bounds = loaded_page.bounds()?;
     let page_width = bounds.width().max(1.0);
     let page_height = bounds.height().max(1.0);
+    let source = source_rect.as_unit_rect();
+    let source_width = ((source[2] - source[0]) * page_width).max(1.0);
+    let source_height = ((source[3] - source[1]) * page_height).max(1.0);
     let scale =
-        (surface_size.width as f32 / page_width).min(surface_size.height as f32 / page_height);
-    let width = (page_width * scale).round().max(1.0) as u32;
-    let height = (page_height * scale).round().max(1.0) as u32;
+        (surface_size.width as f32 / source_width).min(surface_size.height as f32 / source_height);
+    let width = (source_width * scale).ceil().max(1.0) as u32;
+    let height = (source_height * scale).ceil().max(1.0) as u32;
     Ok(Some(RenderKey {
         generation,
         page,
         width,
         height,
+        source: source_rect,
     }))
 }
 
@@ -619,10 +680,36 @@ fn render_page_to_texture(
 ) -> Result<RenderedPage> {
     let page = document.load_page(key.page as i32)?;
     let bounds = page.bounds()?;
-    let scale = (key.width as f32 / bounds.width().max(1.0))
-        .min(key.height as f32 / bounds.height().max(1.0));
-    let matrix = Matrix::new_scale(scale, scale);
-    let pixmap = page.to_pixmap(&matrix, &Colorspace::device_rgb(), false, true)?;
+    let source = key.source.as_unit_rect();
+    let source_x0 = bounds.x0 + source[0] * bounds.width().max(1.0);
+    let source_y0 = bounds.y0 + source[1] * bounds.height().max(1.0);
+    let source_width = ((source[2] - source[0]) * bounds.width().max(1.0)).max(1.0);
+    let source_height = ((source[3] - source[1]) * bounds.height().max(1.0)).max(1.0);
+    let scale = (key.width as f32 / source_width).min(key.height as f32 / source_height);
+    let pixmap = if key.source.is_full() {
+        let matrix = Matrix::new_scale(scale, scale);
+        page.to_pixmap(&matrix, &Colorspace::device_rgb(), false, true)?
+    } else {
+        let mut pixmap = Pixmap::new_with_w_h(
+            &Colorspace::device_rgb(),
+            key.width as i32,
+            key.height as i32,
+            false,
+        )?;
+        pixmap.clear_with(255)?;
+        let matrix = Matrix::new(
+            scale,
+            0.0,
+            0.0,
+            scale,
+            -source_x0 * scale,
+            -source_y0 * scale,
+        );
+        let clip = IRect::new(0, 0, key.width as i32, key.height as i32);
+        let draw_device = MupdfDevice::from_pixmap_with_clip(&pixmap, clip)?;
+        page.run(&draw_device, &matrix)?;
+        pixmap
+    };
     let width = pixmap.width();
     let height = pixmap.height();
     let n = pixmap.n() as usize;
@@ -681,6 +768,8 @@ fn render_page_to_texture(
         _texture: Arc::new(texture),
         view: Arc::new(view),
         bytes: rgba.len() as u64,
+        source_rect: key.source.as_unit_rect(),
+        page_points: [bounds.width().max(1.0), bounds.height().max(1.0)],
     })
 }
 
@@ -690,6 +779,8 @@ struct Uniforms {
     surface_image: [f32; 4],
     mouse_flags: [f32; 4],
     highlight: [f32; 4],
+    zoom_pan: [f32; 4],
+    source_rect: [f32; 4],
 }
 
 #[repr(C)]
@@ -709,6 +800,7 @@ struct Gpu {
     laser_buffer: Arc<wgpu::Buffer>,
     placeholder: RenderedPage,
     surface_format: wgpu::TextureFormat,
+    max_texture_dimension_2d: u32,
 }
 
 impl Gpu {
@@ -733,6 +825,7 @@ impl Gpu {
         .context("requesting WGPU device")?;
         let device = Arc::new(device);
         let queue = Arc::new(queue);
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let size = window.surface_size();
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -852,6 +945,7 @@ impl Gpu {
                 laser_buffer,
                 placeholder,
                 surface_format,
+                max_texture_dimension_2d,
             },
             surface,
         ))
@@ -894,10 +988,13 @@ fn make_placeholder_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> Rende
             page: 0,
             width: 1,
             height: 1,
+            source: SourceRectKey::FULL,
         },
         _texture: Arc::new(texture),
         view: Arc::new(view),
         bytes: 4,
+        source_rect: SourceRectKey::FULL.as_unit_rect(),
+        page_points: [1.0, 1.0],
     }
 }
 
@@ -913,6 +1010,8 @@ struct PresenterWindow {
     config: wgpu::SurfaceConfiguration,
     worker: RenderWorker,
     current: Option<RenderedPage>,
+    full_page: Option<RenderedPage>,
+    full_page_bind_group: Option<wgpu::BindGroup>,
     bind_group: wgpu::BindGroup,
     wanted_request_id: u64,
     displayed_request_id: u64,
@@ -926,6 +1025,9 @@ struct PresenterWindow {
     resize_drag: Option<ResizeDrag>,
     mirror: bool,
     decorated: bool,
+    zoom: f64,
+    pan: [f64; 2],
+    pending_zoom_render_at: Option<Instant>,
 }
 
 impl PresenterWindow {
@@ -974,6 +1076,8 @@ impl PresenterWindow {
             config,
             worker,
             current: None,
+            full_page: None,
+            full_page_bind_group: None,
             bind_group,
             wanted_request_id: 0,
             displayed_request_id: 0,
@@ -987,6 +1091,9 @@ impl PresenterWindow {
             resize_drag: None,
             mirror: false,
             decorated: true,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+            pending_zoom_render_at: None,
         })
     }
 
@@ -1018,21 +1125,82 @@ impl PresenterWindow {
     }
 
     fn page_image_size(&self, page_points: [f32; 2]) -> [f64; 2] {
-        let page_width = page_points[0].max(1.0) as f64;
-        let page_height = page_points[1].max(1.0) as f64;
+        let (page_width, page_height) = self
+            .current
+            .as_ref()
+            .map(|page| (page.page_points[0] as f64, page.page_points[1] as f64))
+            .unwrap_or((page_points[0] as f64, page_points[1] as f64));
+        let page_width = page_width.max(1.0);
+        let page_height = page_height.max(1.0);
         let scale = (self.surface_size.width as f64 / page_width)
             .min(self.surface_size.height as f64 / page_height);
         [
-            (page_width * scale).round().max(1.0),
-            (page_height * scale).round().max(1.0),
+            (page_width * scale).ceil().max(1.0),
+            (page_height * scale).ceil().max(1.0),
         ]
     }
 
+    fn draw_image_size(&self, page_points: [f32; 2]) -> [f64; 2] {
+        let base = self.page_image_size(page_points);
+        [base[0] * self.zoom, base[1] * self.zoom]
+    }
+
+    fn render_request_geometry(
+        &self,
+        max_texture_dimension_2d: u32,
+        page_points: [f32; 2],
+    ) -> (PhysicalSize<u32>, SourceRectKey) {
+        let max_dimension = max_texture_dimension_2d.max(1);
+        if self.zoom <= 1.0 + ZOOM_EPSILON {
+            let image = self.draw_image_size(page_points);
+            return (
+                PhysicalSize::new(
+                    (image[0].ceil().max(1.0) as u32).min(max_dimension),
+                    (image[1].ceil().max(1.0) as u32).min(max_dimension),
+                ),
+                SourceRectKey::FULL,
+            );
+        }
+
+        let rect = self.page_image_rect(page_points);
+        let visible_x0 = rect[0].max(0.0);
+        let visible_y0 = rect[1].max(0.0);
+        let visible_x1 = (rect[0] + rect[2]).min(self.surface_size.width as f64);
+        let visible_y1 = (rect[1] + rect[3]).min(self.surface_size.height as f64);
+        if visible_x0 >= visible_x1 || visible_y0 >= visible_y1 {
+            return (
+                PhysicalSize::new(
+                    self.surface_size.width.max(1).min(max_dimension),
+                    self.surface_size.height.max(1).min(max_dimension),
+                ),
+                SourceRectKey::FULL,
+            );
+        }
+
+        let source_rect = SourceRectKey::from_unit_rect([
+            (visible_x0 - rect[0]) / rect[2],
+            (visible_y0 - rect[1]) / rect[3],
+            (visible_x1 - rect[0]) / rect[2],
+            (visible_y1 - rect[1]) / rect[3],
+        ]);
+        (
+            PhysicalSize::new(
+                ((visible_x1 - visible_x0).ceil().max(1.0) as u32).min(max_dimension),
+                ((visible_y1 - visible_y0).ceil().max(1.0) as u32).min(max_dimension),
+            ),
+            source_rect,
+        )
+    }
+
+    fn is_zoomed(&self) -> bool {
+        (self.zoom - 1.0).abs() > ZOOM_EPSILON || self.pan[0].abs() > 0.5 || self.pan[1].abs() > 0.5
+    }
+
     fn page_image_rect(&self, page_points: [f32; 2]) -> [f64; 4] {
-        let image = self.page_image_size(page_points);
+        let image = self.draw_image_size(page_points);
         [
-            ((self.surface_size.width as f64 - image[0]) * 0.5).floor(),
-            ((self.surface_size.height as f64 - image[1]) * 0.5).floor(),
+            ((self.surface_size.width as f64 - image[0]) * 0.5 + self.pan[0]).floor(),
+            ((self.surface_size.height as f64 - image[1]) * 0.5 + self.pan[1]).floor(),
             image[0],
             image[1],
         ]
@@ -1060,6 +1228,122 @@ impl PresenterWindow {
             rect[0] + position.x * rect[2],
             rect[1] + position.y * rect[3],
         )
+    }
+
+    fn clamp_pan(&mut self, page_points: [f32; 2]) {
+        let image = self.draw_image_size(page_points);
+        let max_x = ((image[0] - self.surface_size.width as f64) * 0.5).max(0.0);
+        let max_y = ((image[1] - self.surface_size.height as f64) * 0.5).max(0.0);
+        self.pan[0] = self.pan[0].clamp(-max_x, max_x);
+        self.pan[1] = self.pan[1].clamp(-max_y, max_y);
+    }
+
+    fn zoom_about(
+        &mut self,
+        factor: f64,
+        anchor: PhysicalPosition<f64>,
+        page_points: [f32; 2],
+    ) -> bool {
+        if !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
+        let old_zoom = self.zoom;
+        let new_zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        if (new_zoom - old_zoom).abs() <= ZOOM_EPSILON {
+            return false;
+        }
+
+        let old_image = self.draw_image_size(page_points);
+        let old_origin = [
+            (self.surface_size.width as f64 - old_image[0]) * 0.5 + self.pan[0],
+            (self.surface_size.height as f64 - old_image[1]) * 0.5 + self.pan[1],
+        ];
+        let unit = [
+            ((anchor.x - old_origin[0]) / old_image[0]).clamp(0.0, 1.0),
+            ((anchor.y - old_origin[1]) / old_image[1]).clamp(0.0, 1.0),
+        ];
+
+        self.zoom = new_zoom;
+        let new_image = self.draw_image_size(page_points);
+        self.pan[0] = anchor.x
+            - (self.surface_size.width as f64 - new_image[0]) * 0.5
+            - unit[0] * new_image[0];
+        self.pan[1] = anchor.y
+            - (self.surface_size.height as f64 - new_image[1]) * 0.5
+            - unit[1] * new_image[1];
+        self.clamp_pan(page_points);
+        self.window.request_redraw();
+        true
+    }
+
+    fn pan_by(&mut self, delta: [f64; 2], page_points: [f32; 2]) -> bool {
+        if delta[0].abs() < f64::EPSILON && delta[1].abs() < f64::EPSILON {
+            return false;
+        }
+        let before = self.pan;
+        self.pan[0] += delta[0];
+        self.pan[1] += delta[1];
+        self.clamp_pan(page_points);
+        if self.pan != before {
+            self.window.request_redraw();
+            return true;
+        }
+        false
+    }
+
+    fn reset_zoom(&mut self, page_points: [f32; 2]) -> bool {
+        let changed = self.is_zoomed();
+        self.zoom = 1.0;
+        self.pan = [0.0, 0.0];
+        self.clamp_pan(page_points);
+        if changed {
+            self.window.request_redraw();
+        }
+        changed
+    }
+
+    fn reset_zoom_for_slide_change(&mut self) {
+        self.zoom = 1.0;
+        self.pan = [0.0, 0.0];
+        self.pending_zoom_render_at = None;
+        self.full_page = None;
+        self.full_page_bind_group = None;
+        self.window.request_redraw();
+    }
+
+    fn use_full_page_if_available(&mut self) {
+        let Some(full_page) = self.full_page.clone() else {
+            return;
+        };
+        let Some(full_bind_group) = self.full_page_bind_group.as_ref() else {
+            return;
+        };
+        let same_page = self
+            .current
+            .as_ref()
+            .map(|current| {
+                current.key.generation == full_page.key.generation
+                    && current.key.page == full_page.key.page
+            })
+            .unwrap_or(true);
+        if same_page
+            && !self
+                .current
+                .as_ref()
+                .is_some_and(|page| page.key.source.is_full())
+        {
+            self.bind_group = full_bind_group.clone();
+            self.current = Some(full_page);
+            self.window.request_redraw();
+        }
+    }
+
+    fn defer_zoom_render(&mut self) {
+        self.pending_zoom_render_at = Some(Instant::now() + ZOOM_RENDER_DEBOUNCE);
+    }
+
+    fn finish_zoom_render(&mut self) {
+        self.pending_zoom_render_at = Some(Instant::now());
     }
 
     fn set_page(&mut self, request: RenderRequest) {
@@ -1095,7 +1379,12 @@ impl PresenterWindow {
                     if page.key.generation == generation
                         && (requested_current_page || latest_current_page)
                     {
-                        self.bind_group = create_bind_group(gpu, &page.view);
+                        let bind_group = create_bind_group(gpu, &page.view);
+                        if page.key.source.is_full() {
+                            self.full_page = Some(page.clone());
+                            self.full_page_bind_group = Some(bind_group.clone());
+                        }
+                        self.bind_group = bind_group;
                         self.current = Some(page);
                         self.displayed_request_id = request_id;
                         self.window.request_redraw();
@@ -1131,12 +1420,20 @@ impl PresenterWindow {
         }
     }
 
-    fn draw(&mut self, gpu: &Gpu) -> Result<()> {
+    fn draw(&mut self, gpu: &Gpu, page_points: [f32; 2]) -> Result<()> {
         let image_size = self
             .current
             .as_ref()
-            .map(|p| [p.key.width as f32, p.key.height as f32])
+            .map(|_| {
+                let image = self.draw_image_size(page_points);
+                [image[0] as f32, image[1] as f32]
+            })
             .unwrap_or([1.0, 1.0]);
+        let source_rect = self
+            .current
+            .as_ref()
+            .map(|page| page.source_rect)
+            .unwrap_or_else(|| SourceRectKey::FULL.as_unit_rect());
         let flags = self.flags();
         let highlight_end = [self.mouse.x as f32, self.mouse.y as f32];
         let highlight_start = self.highlight_start.unwrap_or(self.mouse);
@@ -1159,6 +1456,8 @@ impl PresenterWindow {
                 highlight_end[0],
                 highlight_end[1],
             ],
+            zoom_pan: [self.pan[0] as f32, self.pan[1] as f32, 0.0, 0.0],
+            source_rect,
         };
         gpu.queue
             .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -1222,21 +1521,30 @@ impl PresenterWindow {
         match self.mouse_down {
             Some(MouseButton::Left) => flags |= FLAG_LASER,
             Some(MouseButton::Right) => flags |= FLAG_HIGHLIGHT,
-            Some(MouseButton::Middle) => flags |= FLAG_MAGNIFY,
+            Some(MouseButton::Middle) if !self.is_zoomed() => flags |= FLAG_MAGNIFY,
             _ => {}
         }
         flags
     }
 
-    fn pointer_moved(&mut self, position: PhysicalPosition<f64>) {
+    fn pointer_moved(&mut self, position: PhysicalPosition<f64>, page_points: [f32; 2]) -> bool {
+        let previous = self.mouse;
         self.mouse = position;
+        let mut panned = false;
         if self.mouse_down == Some(MouseButton::Left) {
             self.laser.push_back(position);
             while self.laser.len() > LASER_POINTS {
                 self.laser.pop_front();
             }
         }
+        if self.mouse_down == Some(MouseButton::Middle) && self.is_zoomed() {
+            panned = self.pan_by(
+                [position.x - previous.x, position.y - previous.y],
+                page_points,
+            );
+        }
         self.window.request_redraw();
+        panned
     }
 
     fn pointer_button(&mut self, button: MouseButton, state: ElementState) {
@@ -1488,6 +1796,8 @@ impl App {
             config,
             worker,
             current: None,
+            full_page: None,
+            full_page_bind_group: None,
             bind_group,
             wanted_request_id: 0,
             displayed_request_id: 0,
@@ -1501,6 +1811,9 @@ impl App {
             resize_drag: None,
             mirror: false,
             decorated: true,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+            pending_zoom_render_at: None,
         };
         let id = presenter.id();
         self.gpu = Some(gpu);
@@ -1555,21 +1868,76 @@ impl App {
         }
     }
 
+    fn max_texture_dimension_2d(&self) -> u32 {
+        self.gpu
+            .as_ref()
+            .map(|gpu| gpu.max_texture_dimension_2d)
+            .unwrap_or(u32::MAX)
+    }
+
     fn schedule_all(&mut self) {
         self.request_counter = self.request_counter.wrapping_add(1);
         let request_id = self.request_counter;
+        let max_texture_dimension_2d = self.max_texture_dimension_2d();
         for window in self.windows.values_mut() {
+            let (size, source_rect) =
+                window.render_request_geometry(max_texture_dimension_2d, self.page_points);
             window.set_page(RenderRequest {
                 source: self.source.clone(),
                 current_page: self.current_page,
                 page_count: self.page_count,
-                size: window.surface_size,
+                size,
+                source_rect,
                 direction: self.direction,
                 ahead: self.args.ahead,
                 request_id,
             });
         }
         self.proxy.wake_up();
+    }
+
+    fn schedule_window(&mut self, window_id: WindowId) {
+        let max_texture_dimension_2d = self.max_texture_dimension_2d();
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        self.request_counter = self.request_counter.wrapping_add(1);
+        let request_id = self.request_counter;
+        let (size, source_rect) =
+            window.render_request_geometry(max_texture_dimension_2d, self.page_points);
+        window.pending_zoom_render_at = None;
+        window.set_page(RenderRequest {
+            source: self.source.clone(),
+            current_page: self.current_page,
+            page_count: self.page_count,
+            size,
+            source_rect,
+            direction: self.direction,
+            ahead: self.args.ahead,
+            request_id,
+        });
+        self.proxy.wake_up();
+    }
+
+    fn schedule_due_zoom_renders(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let ids = self
+            .windows
+            .iter()
+            .filter_map(|(id, window)| {
+                window
+                    .pending_zoom_render_at
+                    .filter(|deadline| *deadline <= now)
+                    .map(|_| *id)
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.schedule_window(id);
+        }
+        self.windows
+            .values()
+            .filter_map(|window| window.pending_zoom_render_at)
+            .min()
     }
 
     fn poll_workers(&mut self) {
@@ -1595,6 +1963,9 @@ impl App {
         if next != self.current_page {
             self.current_page = next;
             self.direction = delta.signum();
+            for window in self.windows.values_mut() {
+                window.reset_zoom_for_slide_change();
+            }
             self.update_window_titles();
             self.schedule_all();
         }
@@ -1606,18 +1977,24 @@ impl App {
         }
     }
 
-    fn mirror_pointer_moved(&mut self, source_id: WindowId, position: PhysicalPosition<f64>) {
+    fn mirror_pointer_moved(
+        &mut self,
+        source_id: WindowId,
+        position: PhysicalPosition<f64>,
+    ) -> bool {
         let Some(page_position) = self
             .windows
             .get(&source_id)
             .map(|window| window.page_unit_at(position, self.page_points))
         else {
-            return;
+            return false;
         };
+        let mut panned = false;
         for window in self.windows.values_mut() {
             let position = window.position_for_page_unit(page_position, self.page_points);
-            window.pointer_moved(position);
+            panned |= window.pointer_moved(position, self.page_points);
         }
+        panned
     }
 
     fn mirror_pointer_button(
@@ -1649,7 +2026,13 @@ impl App {
         self.source = source;
         self.page_count = info.page_count;
         self.page_points = info.page_points;
+        let old_current_page = self.current_page;
         self.current_page = self.current_page.min(self.page_count - 1);
+        if self.current_page != old_current_page {
+            for window in self.windows.values_mut() {
+                window.reset_zoom_for_slide_change();
+            }
+        }
         let requested_size = window_size_for_page(self.page_points);
         for window in self.windows.values() {
             let _ = window.window.request_surface_size(requested_size.into());
@@ -1709,7 +2092,7 @@ impl ApplicationHandler for App {
                     window.window.fullscreen().is_some() || window.in_fullscreen_transition();
                 if !fullscreen_or_transition {
                     if let Some(pending) = window.pending_aspect_size.take() {
-                        if sizes_close(size, pending, 2) {
+                        if size == pending {
                             window.resize(gpu, size);
                             self.schedule_all();
                             return;
@@ -1728,10 +2111,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let resized = window.sync_surface_size(gpu);
-                if let Err(err) = window.draw(gpu) {
+                if let Err(err) = window.draw(gpu, self.page_points) {
                     eprintln!("{err:?}");
                 }
                 if resized {
+                    window.clamp_pan(self.page_points);
                     window.window.request_redraw();
                     self.schedule_all();
                 }
@@ -1740,7 +2124,20 @@ impl ApplicationHandler for App {
                 if window.update_modified_window_resize(position, self.page_points) {
                     return;
                 }
-                self.mirror_pointer_moved(window_id, position);
+                if self.mirror_pointer_moved(window_id, position) {
+                    for window in self.windows.values_mut() {
+                        window.use_full_page_if_available();
+                        window.defer_zoom_render();
+                    }
+                    if let Some(deadline) = self
+                        .windows
+                        .values()
+                        .filter_map(|window| window.pending_zoom_render_at)
+                        .min()
+                    {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    }
+                }
             }
             WindowEvent::PointerButton {
                 button,
@@ -1768,7 +2165,7 @@ impl ApplicationHandler for App {
                             if window.finish_modified_window_resize(button, state) {
                                 return;
                             }
-                            self.mirror_pointer_moved(window_id, position);
+                            let _ = self.mirror_pointer_moved(window_id, position);
                             self.mirror_pointer_button(window_id, button, state);
                         }
                     }
@@ -1777,13 +2174,85 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
-            WindowEvent::MouseWheel { delta, .. } => match delta {
-                MouseScrollDelta::LineDelta(_, y) if y < 0.0 => self.go(1),
-                MouseScrollDelta::LineDelta(_, y) if y > 0.0 => self.go(-1),
-                MouseScrollDelta::PixelDelta(delta) if delta.y < 0.0 => self.go(1),
-                MouseScrollDelta::PixelDelta(delta) if delta.y > 0.0 => self.go(-1),
-                _ => {}
-            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.modifiers.shift_key() {
+                    match delta {
+                        MouseScrollDelta::LineDelta(_, y) if y < 0.0 => self.go(1),
+                        MouseScrollDelta::LineDelta(_, y) if y > 0.0 => self.go(-1),
+                        MouseScrollDelta::PixelDelta(delta) if delta.y < 0.0 => self.go(1),
+                        MouseScrollDelta::PixelDelta(delta) if delta.y > 0.0 => self.go(-1),
+                        _ => {}
+                    }
+                } else {
+                    match delta {
+                        MouseScrollDelta::LineDelta(_, y) if y != 0.0 => {
+                            if window.zoom_about(
+                                WHEEL_ZOOM_STEP.powf(y as f64),
+                                window.mouse,
+                                self.page_points,
+                            ) {
+                                window.use_full_page_if_available();
+                                window.defer_zoom_render();
+                                if let Some(deadline) = window.pending_zoom_render_at {
+                                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                                }
+                            }
+                        }
+                        MouseScrollDelta::PixelDelta(delta)
+                            if window.is_zoomed() && delta.x.abs() > delta.y.abs() =>
+                        {
+                            if window.pan_by([delta.x, delta.y], self.page_points) {
+                                window.use_full_page_if_available();
+                                window.defer_zoom_render();
+                                if let Some(deadline) = window.pending_zoom_render_at {
+                                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                                }
+                            }
+                        }
+                        MouseScrollDelta::PixelDelta(delta) if delta.y != 0.0 => {
+                            if window.zoom_about(
+                                (delta.y * PIXEL_ZOOM_SPEED).exp(),
+                                window.mouse,
+                                self.page_points,
+                            ) {
+                                window.use_full_page_if_available();
+                                window.defer_zoom_render();
+                                if let Some(deadline) = window.pending_zoom_render_at {
+                                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::PinchGesture { delta, phase, .. } => {
+                let finished = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+                let changed =
+                    window.zoom_about((1.0 + delta).max(0.01), window.mouse, self.page_points);
+                if changed && !finished {
+                    window.use_full_page_if_available();
+                    window.defer_zoom_render();
+                    if let Some(deadline) = window.pending_zoom_render_at {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    }
+                }
+                if finished {
+                    window.finish_zoom_render();
+                    self.proxy.wake_up();
+                }
+            }
+            WindowEvent::PanGesture { delta, .. } => {
+                if window.is_zoomed()
+                    && window.pan_by([delta.x as f64, delta.y as f64], self.page_points)
+                {
+                    window.use_full_page_if_available();
+                    window.defer_zoom_render();
+                    if let Some(deadline) = window.pending_zoom_render_at {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    }
+                }
+            }
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic: false,
@@ -1796,14 +2265,27 @@ impl ApplicationHandler for App {
                     self.go(-1)
                 }
                 Key::Named(NamedKey::Home) => {
-                    self.current_page = 0;
-                    self.direction = -1;
-                    self.schedule_all();
+                    if self.current_page != 0 {
+                        self.current_page = 0;
+                        self.direction = -1;
+                        for window in self.windows.values_mut() {
+                            window.reset_zoom_for_slide_change();
+                        }
+                        self.update_window_titles();
+                        self.schedule_all();
+                    }
                 }
                 Key::Named(NamedKey::End) => {
-                    self.current_page = self.page_count.saturating_sub(1);
-                    self.direction = 1;
-                    self.schedule_all();
+                    let last = self.page_count.saturating_sub(1);
+                    if self.current_page != last {
+                        self.current_page = last;
+                        self.direction = 1;
+                        for window in self.windows.values_mut() {
+                            window.reset_zoom_for_slide_change();
+                        }
+                        self.update_window_titles();
+                        self.schedule_all();
+                    }
                 }
                 Key::Character(ch)
                     if ch.eq_ignore_ascii_case("q") && self.modifiers.control_key() =>
@@ -1813,6 +2295,13 @@ impl ApplicationHandler for App {
                 Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
                 Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
                 Key::Character(ch) if ch == " " => self.go(1),
+                Key::Character(ch) if ch == "0" => {
+                    if window.reset_zoom(self.page_points) {
+                        window.use_full_page_if_available();
+                        window.finish_zoom_render();
+                        self.proxy.wake_up();
+                    }
+                }
                 Key::Character(ch) if ch.eq_ignore_ascii_case("f") => window.toggle_fullscreen(),
                 Key::Character(ch) if ch.eq_ignore_ascii_case("d") => window.toggle_decorations(),
                 Key::Character(ch) if ch.eq_ignore_ascii_case("r") => {
@@ -1826,15 +2315,25 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
+    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
         self.drain_macos_navigation();
         self.poll_workers();
+        if let Some(deadline) = self.schedule_due_zoom_renders() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         self.drain_macos_navigation();
         self.check_hot_reload();
         self.poll_workers();
+        if let Some(deadline) = self.schedule_due_zoom_renders() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 }
 
@@ -1855,6 +2354,8 @@ struct Uniforms {
     surface_image: vec4<f32>,
     mouse_flags: vec4<f32>,
     highlight: vec4<f32>,
+    zoom_pan: vec4<f32>,
+    source_rect: vec4<f32>,
 }
 
 struct LaserPoints {
@@ -1885,7 +2386,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 fn image_rect() -> vec4<f32> {
     let surface = uniforms.surface_image.xy;
     let image = uniforms.surface_image.zw;
-    let origin = floor((surface - image) * 0.5);
+    let origin = floor((surface - image) * 0.5 + uniforms.zoom_pan.xy);
     return vec4<f32>(origin, image);
 }
 
@@ -1896,10 +2397,15 @@ fn slide_scale() -> f32 {
 
 fn sample_page(pixel: vec2<f32>) -> vec4<f32> {
     let rect = image_rect();
-    let uv = (pixel - rect.xy) / rect.zw;
-    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+    let page_uv = (pixel - rect.xy) / rect.zw;
+    if (page_uv.x < 0.0 || page_uv.y < 0.0 || page_uv.x > 1.0 || page_uv.y > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
+    let source = uniforms.source_rect;
+    if (page_uv.x < source.x || page_uv.y < source.y || page_uv.x > source.z || page_uv.y > source.w) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let uv = (page_uv - source.xy) / max(source.zw - source.xy, vec2<f32>(0.000001, 0.000001));
     return textureSampleLevel(pdf_texture, pdf_sampler, uv, 0.0);
 }
 

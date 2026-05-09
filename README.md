@@ -9,7 +9,7 @@ Minimal PDF presentation viewer for Beamer-style talks.
 - Optional mirror window for screensharing.
 - Hot reload for regenerated PDFs.
 - Fullscreen toggle and macOS decoration toggle.
-- Mouse back/forward buttons, scroll wheel, keyboard navigation, and macOS swipe navigation.
+- Mouse back/forward buttons, wheel and touchpad zoom, keyboard navigation, and macOS swipe navigation.
 
 ## Usage
 
@@ -34,17 +34,21 @@ pdfpresenter [OPTIONS] <PDF>
 
 ## Controls
 
-- `Right`, `PageDown`, `Enter`, `Space`, mouse forward, scroll down: next slide
-- `Left`, `PageUp`, `Backspace`, mouse back, scroll up: previous slide
+- `Right`, `PageDown`, `Enter`, `Space`, mouse forward, `Shift` + scroll down: next slide
+- `Left`, `PageUp`, `Backspace`, mouse back, `Shift` + scroll up: previous slide
 - `Home` / `End`: first / last slide
+- `0`: reset zoom
 - `f` or `F11`: toggle fullscreen
 - `d`: toggle window decorations
 - `r`: reload PDF
 - `Esc`: exit fullscreen
 - `Ctrl` + `Q`: quit
+- Mouse wheel: zoom in / out
+- Touchpad pinch: zoom in / out
+- Two-finger pan or middle mouse drag while zoomed: pan
 - Left mouse hold: laser pointer
 - Right mouse drag: highlight
-- Middle mouse hold: magnifier
+- Middle mouse hold while not zoomed: magnifier
 - `Ctrl` + left drag: move window
 - `Ctrl` + right drag: resize window
 
