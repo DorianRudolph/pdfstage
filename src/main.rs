@@ -18,6 +18,7 @@ use cli::Args;
 use platform::install_macos_swipe_monitor;
 
 fn main() -> Result<()> {
+    env_logger::init();
     let args = Args::parse();
     let event_loop = EventLoop::new()?;
     let proxy = event_loop.create_proxy();

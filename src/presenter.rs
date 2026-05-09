@@ -150,8 +150,7 @@ impl PresenterWindow {
     ) -> Option<PhysicalSize<u32>> {
         let before = self.window.surface_size();
         let result = self.window.request_surface_size(requested.into());
-        #[cfg(debug_assertions)]
-        eprintln!(
+        log::debug!(
             "[resize] window={:?} request_surface_size reason={reason} before={before:?} requested={requested:?} result={result:?}",
             self.id()
         );
@@ -160,20 +159,17 @@ impl PresenterWindow {
 
     pub(crate) fn resize(&mut self, gpu: &Gpu, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
-            #[cfg(debug_assertions)]
-            eprintln!(
+            log::debug!(
                 "[resize] window={:?} ignoring zero-sized surface resize: {size:?}",
                 self.id()
             );
             return;
         }
         if size == self.surface_size {
-            #[cfg(debug_assertions)]
-            eprintln!("[resize] window={:?} surface already configured at {size:?}", self.id());
+            log::debug!("[resize] window={:?} surface already configured at {size:?}", self.id());
             return;
         }
-        #[cfg(debug_assertions)]
-        eprintln!(
+        log::debug!(
             "[resize] window={:?} configure surface from {:?} to {size:?}",
             self.id(),
             self.surface_size
@@ -192,8 +188,7 @@ impl PresenterWindow {
         if size == self.surface_size {
             return false;
         }
-        #[cfg(debug_assertions)]
-        eprintln!(
+        log::debug!(
             "[resize] window={:?} sync_surface_size observed {:?} while configured {:?}",
             self.id(),
             size,

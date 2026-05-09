@@ -376,16 +376,16 @@ impl ApplicationHandler for App {
             WindowEvent::SurfaceResized(size) => {
                 let fullscreen_or_transition =
                     window.window.fullscreen().is_some() || window.in_fullscreen_transition();
-                #[cfg(debug_assertions)]
-                eprintln!(
+                log::debug!(
                     "[resize] window={window_id:?} SurfaceResized size={size:?} configured={:?} pending={:?} free_aspect={} fullscreen_or_transition={fullscreen_or_transition}",
-                    window.surface_size, window.pending_aspect_size, self.args.free_aspect
+                    window.surface_size,
+                    window.pending_aspect_size,
+                    self.args.free_aspect
                 );
                 if !fullscreen_or_transition && !self.args.free_aspect {
                     if let Some(pending) = window.pending_aspect_size.take() {
                         if size == pending {
-                            #[cfg(debug_assertions)]
-                            eprintln!(
+                            log::debug!(
                                 "[resize] window={window_id:?} pending aspect size accepted: {size:?}"
                             );
                             window.last_aspect_request = None;
@@ -393,8 +393,7 @@ impl ApplicationHandler for App {
                             self.schedule_all();
                             return;
                         }
-                        #[cfg(debug_assertions)]
-                        eprintln!(
+                        log::debug!(
                             "[resize] window={window_id:?} pending aspect size {pending:?} did not match event size {size:?}"
                         );
                     }
@@ -403,8 +402,7 @@ impl ApplicationHandler for App {
                             window.last_aspect_request == Some((size, corrected));
                         window.resize(gpu, size);
                         if repeated_request {
-                            #[cfg(debug_assertions)]
-                            eprintln!(
+                            log::debug!(
                                 "[resize] window={window_id:?} suppressing repeated aspect request for size={size:?} corrected={corrected:?}"
                             );
                         } else {
@@ -412,8 +410,7 @@ impl ApplicationHandler for App {
                                 Some(applied) => {
                                     window.pending_aspect_size = None;
                                     window.last_aspect_request = Some((size, corrected));
-                                    #[cfg(debug_assertions)]
-                                    eprintln!(
+                                    log::debug!(
                                         "[resize] window={window_id:?} aspect request returned {applied:?}; keeping SurfaceResized size {size:?} until compositor reports another size"
                                     );
                                 }
