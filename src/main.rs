@@ -67,10 +67,68 @@ impl PdfSource {
         })
     }
 
-    fn page_count(&self) -> Result<usize> {
+    fn info(&self) -> Result<PdfInfo> {
         let document = Document::from_bytes(&self.bytes, "pdf")?;
-        Ok(document.page_count()?.max(0) as usize)
+        let page_count = document.page_count()?.max(0) as usize;
+        let page_points = if page_count == 0 {
+            [16.0, 9.0]
+        } else {
+            let page = document.load_page(0)?;
+            let bounds = page.bounds()?;
+            [bounds.width().max(1.0), bounds.height().max(1.0)]
+        };
+        Ok(PdfInfo {
+            page_count,
+            page_points,
+        })
     }
+}
+
+#[derive(Clone, Copy)]
+struct PdfInfo {
+    page_count: usize,
+    page_points: [f32; 2],
+}
+
+fn window_size_for_page(page_points: [f32; 2]) -> PhysicalSize<u32> {
+    let aspect = (page_points[0] / page_points[1]).clamp(0.25, 4.0);
+    let max_width = 1280.0;
+    let max_height = 900.0;
+    let (width, height) = if max_width / aspect <= max_height {
+        (max_width, max_width / aspect)
+    } else {
+        (max_height * aspect, max_height)
+    };
+    PhysicalSize::new(width.round() as u32, height.round() as u32)
+}
+
+fn aspect_corrected_size(
+    size: PhysicalSize<u32>,
+    page_points: [f32; 2],
+) -> Option<PhysicalSize<u32>> {
+    if size.width == 0 || size.height == 0 {
+        return None;
+    }
+
+    let aspect = (page_points[0] / page_points[1]).clamp(0.25, 4.0);
+    let height_from_width = ((size.width as f32 / aspect).round() as u32).max(1);
+    let width_from_height = ((size.height as f32 * aspect).round() as u32).max(1);
+    let keep_width = PhysicalSize::new(size.width, height_from_width);
+    let keep_height = PhysicalSize::new(width_from_height, size.height);
+
+    let keep_width_delta = keep_width.height.abs_diff(size.height);
+    let keep_height_delta = keep_height.width.abs_diff(size.width);
+    let corrected = if keep_width_delta <= keep_height_delta {
+        keep_width
+    } else {
+        keep_height
+    };
+
+    (!sizes_close(size, corrected, 2)).then_some(corrected)
+}
+
+fn sizes_close(a: PhysicalSize<u32>, b: PhysicalSize<u32>, tolerance: u32) -> bool {
+    a.width.abs_diff(b.width) <= tolerance && a.height.abs_diff(b.height) <= tolerance
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -653,6 +711,7 @@ struct PresenterWindow {
     bind_group: wgpu::BindGroup,
     wanted_request_id: u64,
     surface_size: PhysicalSize<u32>,
+    pending_aspect_size: Option<PhysicalSize<u32>>,
     mouse: PhysicalPosition<f64>,
     mouse_down: Option<MouseButton>,
     highlight_start: Option<PhysicalPosition<f64>>,
@@ -662,13 +721,19 @@ struct PresenterWindow {
 }
 
 impl PresenterWindow {
-    fn new(event_loop: &dyn ActiveEventLoop, gpu: &Gpu, title: &str, cache_limit: u64) -> Result<Self> {
+    fn new(
+        event_loop: &dyn ActiveEventLoop,
+        gpu: &Gpu,
+        title: &str,
+        cache_limit: u64,
+        initial_size: PhysicalSize<u32>,
+    ) -> Result<Self> {
         let window = event_loop
             .create_window(
                 WindowAttributes::default()
                     .with_title(title)
                     .with_visible(true)
-                    .with_surface_size(PhysicalSize::new(1280, 720)),
+                    .with_surface_size(initial_size),
             )
             .context("creating window")?;
 
@@ -702,6 +767,7 @@ impl PresenterWindow {
             bind_group,
             wanted_request_id: 0,
             surface_size: size,
+            pending_aspect_size: None,
             mouse: PhysicalPosition::new(0.0, 0.0),
             mouse_down: None,
             highlight_start: None,
@@ -936,6 +1002,7 @@ struct App {
     source: PdfSource,
     generation_counter: Arc<AtomicU64>,
     page_count: usize,
+    page_points: [f32; 2],
     current_page: usize,
     direction: i32,
     request_counter: u64,
@@ -947,15 +1014,16 @@ struct App {
 impl App {
     fn new(args: Args) -> Result<Self> {
         let source = PdfSource::load(&args.pdf, 1)?;
-        let page_count = source.page_count()?;
-        if page_count == 0 {
+        let info = source.info()?;
+        if info.page_count == 0 {
             bail!("document has no pages");
         }
         Ok(Self {
             args,
             source,
             generation_counter: Arc::new(AtomicU64::new(1)),
-            page_count,
+            page_count: info.page_count,
+            page_points: info.page_points,
             current_page: 0,
             direction: 1,
             request_counter: 0,
@@ -966,12 +1034,13 @@ impl App {
     }
 
     fn create_windows(&mut self, event_loop: &dyn ActiveEventLoop) -> Result<()> {
+        let initial_size = window_size_for_page(self.page_points);
         let first = event_loop
             .create_window(
                 WindowAttributes::default()
                     .with_title("pdfpresenter")
                     .with_visible(true)
-                    .with_surface_size(PhysicalSize::new(1280, 720)),
+                    .with_surface_size(initial_size),
             )
             .context("creating initial window")?;
         let (gpu, surface) = Gpu::new(&first)?;
@@ -994,6 +1063,7 @@ impl App {
             bind_group,
             wanted_request_id: 0,
             surface_size: size,
+            pending_aspect_size: None,
             mouse: PhysicalPosition::new(0.0, 0.0),
             mouse_down: None,
             highlight_start: None,
@@ -1013,6 +1083,7 @@ impl App {
                 gpu,
                 &format!("pdfpresenter mirror - page 1/{}", self.page_count),
                 self.args.cache_mib.saturating_mul(1024 * 1024),
+                initial_size,
             )?;
             self.windows.insert(mirror.id(), mirror);
         }
@@ -1052,13 +1123,18 @@ impl App {
     fn reload(&mut self) -> Result<()> {
         let generation = self.generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
         let source = PdfSource::load(&self.args.pdf, generation)?;
-        let page_count = source.page_count()?;
-        if page_count == 0 {
+        let info = source.info()?;
+        if info.page_count == 0 {
             bail!("reloaded document has no pages");
         }
         self.source = source;
-        self.page_count = page_count;
+        self.page_count = info.page_count;
+        self.page_points = info.page_points;
         self.current_page = self.current_page.min(self.page_count - 1);
+        let requested_size = window_size_for_page(self.page_points);
+        for window in self.windows.values() {
+            let _ = window.window.request_surface_size(requested_size.into());
+        }
         self.schedule_all();
         Ok(())
     }
@@ -1101,6 +1177,22 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::SurfaceResized(size) => {
+                if !window.fullscreen {
+                    if let Some(pending) = window.pending_aspect_size.take() {
+                        if sizes_close(size, pending, 2) {
+                            window.resize(gpu, size);
+                            self.schedule_all();
+                            return;
+                        }
+                    }
+                    if let Some(corrected) = aspect_corrected_size(size, self.page_points) {
+                        window.pending_aspect_size = Some(corrected);
+                        let _ = window.window.request_surface_size(corrected.into());
+                        return;
+                    }
+                } else {
+                    window.pending_aspect_size = None;
+                }
                 window.resize(gpu, size);
                 self.schedule_all();
             }
@@ -1112,7 +1204,12 @@ impl ApplicationHandler for App {
             WindowEvent::PointerMoved { position, .. } => window.pointer_moved(position),
             WindowEvent::PointerButton { button, state, .. } => {
                 if let Some(button) = button.mouse_button() {
-                    window.pointer_button(button, state);
+                    match (button, state) {
+                        (MouseButton::Back, ElementState::Pressed) => self.go(-1),
+                        (MouseButton::Forward, ElementState::Pressed) => self.go(1),
+                        (MouseButton::Back | MouseButton::Forward, ElementState::Released) => {}
+                        _ => window.pointer_button(button, state),
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => match delta {
