@@ -20,11 +20,20 @@ use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
     monitor::Fullscreen,
     window::{Window, WindowAttributes, WindowId},
 };
+
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
+#[cfg(target_os = "macos")]
+use objc2::{rc::Retained, runtime::AnyObject};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
+#[cfg(target_os = "macos")]
+use std::ptr::NonNull;
 
 const LASER_POINTS: usize = 64;
 const FLAG_LASER: u32 = 1;
@@ -47,6 +56,49 @@ struct Args {
 
     #[arg(long, default_value_t = 3, help = "Pages to render ahead of the current page")]
     ahead: i32,
+}
+
+#[cfg(target_os = "macos")]
+struct MacSwipeMonitor {
+    monitor: Retained<AnyObject>,
+    _block: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacSwipeMonitor {
+    fn drop(&mut self) {
+        unsafe {
+            NSEvent::removeMonitor(&self.monitor);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct MacSwipeMonitor;
+
+#[cfg(target_os = "macos")]
+fn install_macos_swipe_monitor(tx: Sender<i32>, proxy: EventLoopProxy) -> Option<MacSwipeMonitor> {
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let ns_event = unsafe { event.as_ref() };
+        if ns_event.r#type() == NSEventType::Swipe {
+            if let Some(delta) = swipe_navigation_delta(ns_event.deltaX() as f64, ns_event.deltaY() as f64) {
+                let _ = tx.send(delta);
+                proxy.wake_up();
+            }
+        }
+        event.as_ptr()
+    });
+
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::Swipe, &block) };
+    monitor.map(|monitor| MacSwipeMonitor {
+        monitor,
+        _block: block,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_macos_swipe_monitor(_tx: Sender<i32>, _proxy: EventLoopProxy) -> Option<MacSwipeMonitor> {
+    None
 }
 
 #[derive(Clone)]
@@ -129,6 +181,16 @@ fn aspect_corrected_size(
 
 fn sizes_close(a: PhysicalSize<u32>, b: PhysicalSize<u32>, tolerance: u32) -> bool {
     a.width.abs_diff(b.width) <= tolerance && a.height.abs_diff(b.height) <= tolerance
+}
+
+fn swipe_navigation_delta(x: f64, y: f64) -> Option<i32> {
+    if x.abs() >= y.abs() && x.abs() >= 0.1 {
+        Some(if x > 0.0 { -1 } else { 1 })
+    } else if y.abs() >= 0.1 {
+        Some(if y < 0.0 { 1 } else { -1 })
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1008,11 +1070,12 @@ struct App {
     request_counter: u64,
     gpu: Option<Gpu>,
     windows: HashMap<WindowId, PresenterWindow>,
+    mac_nav_rx: Receiver<i32>,
     last_reload_check: Instant,
 }
 
 impl App {
-    fn new(args: Args) -> Result<Self> {
+    fn new(args: Args, mac_nav_rx: Receiver<i32>) -> Result<Self> {
         let source = PdfSource::load(&args.pdf, 1)?;
         let info = source.info()?;
         if info.page_count == 0 {
@@ -1029,6 +1092,7 @@ impl App {
             request_counter: 0,
             gpu: None,
             windows: HashMap::new(),
+            mac_nav_rx,
             last_reload_check: Instant::now(),
         })
     }
@@ -1117,6 +1181,12 @@ impl App {
                 window.window.set_title(&format!("pdfpresenter - page {}/{}", self.current_page + 1, self.page_count));
             }
             self.schedule_all();
+        }
+    }
+
+    fn drain_macos_navigation(&mut self) {
+        while let Ok(delta) = self.mac_nav_rx.try_recv() {
+            self.go(delta);
         }
     }
 
@@ -1250,7 +1320,12 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        self.drain_macos_navigation();
+    }
+
     fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        self.drain_macos_navigation();
         self.check_hot_reload();
         let Some(gpu) = self.gpu.as_ref() else {
             return;
@@ -1264,8 +1339,11 @@ impl ApplicationHandler for App {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let app = App::new(args)?;
     let event_loop = EventLoop::new()?;
+    let proxy = event_loop.create_proxy();
+    let (mac_nav_tx, mac_nav_rx) = mpsc::channel();
+    let _mac_swipe_monitor = install_macos_swipe_monitor(mac_nav_tx, proxy);
+    let app = App::new(args, mac_nav_rx)?;
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(app)?;
     Ok(())
