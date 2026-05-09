@@ -1,17 +1,19 @@
 # pdfstage
 
-Minimal PDF presentation viewer for Beamer-style talks.
+No-frills presentation tool for PDFs.
+
+![screenshot](assets/screenshot.png)
 
 ## Features
 
-- Fast slide changes with background rendering and render-ahead.
 - Laser pointer with tail, right-drag highlight, and middle-click magnifier.
-- Optional mirror window for screensharing.
+- Optional mirror window for screensharing without window decorations.
 - Hot reload for regenerated PDFs.
-- Fullscreen toggle and macOS decoration toggle.
-- Mouse back/forward buttons, wheel and touchpad zoom, keyboard navigation, and macOS swipe navigation.
+- Zoom into slides.
 
 ## Usage
+
+Tested on Linux and Mac.
 
 ```sh
 cargo install --git https://github.com/dorianrudolph/pdfstage
@@ -55,4 +57,13 @@ pdfstage [OPTIONS] <PDF>
 
 ## License
 
-AGPL-3.0
+[AGPL-3.0](LICENSE)
+
+## Credits
+
+Built with:
+
+- [MuPDF](https://mupdf.com/) via [mupdf-rs](https://github.com/messense/mupdf-rs) for PDF rendering
+- [wgpu](https://wgpu.rs/) for GPU rendering
+- [winit](https://github.com/rust-windowing/winit) for windows and input
+- [clap](https://github.com/clap-rs/clap) for command-line parsing

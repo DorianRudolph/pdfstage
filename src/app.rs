@@ -30,6 +30,38 @@ use crate::{
     render::RenderRequest,
 };
 
+fn keyboard_navigation_delta<Str: AsRef<str>>(key: &Key<Str>) -> Option<i32> {
+    match key {
+        Key::Named(
+            NamedKey::ArrowRight | NamedKey::PageDown | NamedKey::Enter | NamedKey::BrowserForward,
+        ) => Some(1),
+        Key::Named(
+            NamedKey::ArrowLeft
+            | NamedKey::PageUp
+            | NamedKey::Backspace
+            | NamedKey::BrowserBack
+            | NamedKey::GoBack,
+        ) => Some(-1),
+        Key::Character(ch) if ch.as_ref() == " " => Some(1),
+        _ => None,
+    }
+}
+
+fn mouse_navigation_delta(button: MouseButton, state: ElementState) -> Option<i32> {
+    if !state.is_pressed() {
+        return None;
+    }
+    match button {
+        MouseButton::Back => Some(-1),
+        MouseButton::Forward => Some(1),
+        _ => None,
+    }
+}
+
+fn is_mouse_navigation_button(button: MouseButton) -> bool {
+    matches!(button, MouseButton::Back | MouseButton::Forward)
+}
+
 pub(crate) struct App {
     args: Args,
     source: PdfSource,
@@ -470,29 +502,25 @@ impl ApplicationHandler for App {
             }
             WindowEvent::PointerButton { button, state, position, .. } => {
                 if let Some(button) = button.mouse_button() {
-                    match (button, state) {
-                        (MouseButton::Back, ElementState::Pressed) => self.go(-1),
-                        (MouseButton::Forward, ElementState::Pressed) => self.go(1),
-                        (MouseButton::Back | MouseButton::Forward, ElementState::Released) => {}
-                        _ => {
-                            if window.start_modified_window_drag(button, state, self.modifiers) {
-                                return;
-                            }
-                            if window.start_modified_window_resize(
-                                button,
-                                state,
-                                position,
-                                self.modifiers,
-                            ) {
-                                return;
-                            }
-                            if window.finish_modified_window_resize(button, state) {
-                                return;
-                            }
-                            let _ = self.mirror_pointer_moved(window_id, position);
-                            self.mirror_pointer_button(window_id, button, state);
-                        }
+                    if let Some(delta) = mouse_navigation_delta(button, state) {
+                        self.go(delta);
+                        return;
                     }
+                    if is_mouse_navigation_button(button) {
+                        return;
+                    }
+                    if window.start_modified_window_drag(button, state, self.modifiers) {
+                        return;
+                    }
+                    if window.start_modified_window_resize(button, state, position, self.modifiers)
+                    {
+                        return;
+                    }
+                    if window.finish_modified_window_resize(button, state) {
+                        return;
+                    }
+                    let _ = self.mirror_pointer_moved(window_id, position);
+                    self.mirror_pointer_button(window_id, button, state);
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -584,13 +612,11 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
                 if event.state.is_pressed() =>
             {
+                if let Some(delta) = keyboard_navigation_delta(&event.logical_key) {
+                    self.go(delta);
+                    return;
+                }
                 match &event.logical_key {
-                    Key::Named(NamedKey::ArrowRight | NamedKey::PageDown | NamedKey::Enter) => {
-                        self.go(1)
-                    }
-                    Key::Named(NamedKey::ArrowLeft | NamedKey::PageUp | NamedKey::Backspace) => {
-                        self.go(-1)
-                    }
                     Key::Named(NamedKey::Home) => {
                         if self.current_page != 0 {
                             self.current_page = 0;
@@ -621,7 +647,6 @@ impl ApplicationHandler for App {
                     }
                     Key::Named(NamedKey::F11) => window.toggle_fullscreen(),
                     Key::Named(NamedKey::Escape) => window.exit_fullscreen(),
-                    Key::Character(ch) if ch == " " => self.go(1),
                     Key::Character(ch) if ch == "0" => {
                         if window.reset_zoom(self.page_points) {
                             window.use_full_page_if_available();
