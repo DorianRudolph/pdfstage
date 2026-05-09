@@ -773,12 +773,12 @@ struct PresenterWindow {
     bind_group: wgpu::BindGroup,
     wanted_request_id: u64,
     surface_size: PhysicalSize<u32>,
+    fullscreen_transition_until: Option<Instant>,
     pending_aspect_size: Option<PhysicalSize<u32>>,
     mouse: PhysicalPosition<f64>,
     mouse_down: Option<MouseButton>,
     highlight_start: Option<PhysicalPosition<f64>>,
     laser: VecDeque<PhysicalPosition<f64>>,
-    fullscreen: bool,
     decorated: bool,
 }
 
@@ -829,12 +829,12 @@ impl PresenterWindow {
             bind_group,
             wanted_request_id: 0,
             surface_size: size,
+            fullscreen_transition_until: None,
             pending_aspect_size: None,
             mouse: PhysicalPosition::new(0.0, 0.0),
             mouse_down: None,
             highlight_start: None,
             laser: VecDeque::new(),
-            fullscreen: false,
             decorated: true,
         })
     }
@@ -855,7 +855,10 @@ impl PresenterWindow {
 
     fn sync_surface_size(&mut self, gpu: &Gpu) -> bool {
         let size = self.window.surface_size();
-        if size.width == 0 || size.height == 0 || size == self.surface_size {
+        if size.width == 0 || size.height == 0 {
+            return false;
+        }
+        if size == self.surface_size {
             return false;
         }
         self.pending_aspect_size = None;
@@ -1020,14 +1023,25 @@ impl PresenterWindow {
     }
 
     fn toggle_fullscreen(&mut self) {
-        self.fullscreen = !self.fullscreen;
+        let fullscreen = self.window.fullscreen().is_none();
+        self.fullscreen_transition_until = Some(Instant::now() + Duration::from_millis(1200));
         self.pending_aspect_size = None;
-        self.window.set_fullscreen(if self.fullscreen {
+        self.window.set_fullscreen(if fullscreen {
             Some(Fullscreen::Borderless(None))
         } else {
             None
         });
         self.window.request_redraw();
+    }
+
+    fn in_fullscreen_transition(&mut self) -> bool {
+        if let Some(until) = self.fullscreen_transition_until {
+            if Instant::now() < until {
+                return true;
+            }
+            self.fullscreen_transition_until = None;
+        }
+        false
     }
 
     fn toggle_decorations(&mut self) {
@@ -1139,12 +1153,12 @@ impl App {
             bind_group,
             wanted_request_id: 0,
             surface_size: size,
+            fullscreen_transition_until: None,
             pending_aspect_size: None,
             mouse: PhysicalPosition::new(0.0, 0.0),
             mouse_down: None,
             highlight_start: None,
             laser: VecDeque::new(),
-            fullscreen: false,
             decorated: true,
         };
         presenter.window.set_title(&format!("pdfpresenter - page 1/{}", self.page_count));
@@ -1259,7 +1273,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::SurfaceResized(size) => {
-                if !window.fullscreen {
+                let fullscreen_or_transition = window.window.fullscreen().is_some() || window.in_fullscreen_transition();
+                if !fullscreen_or_transition {
                     if let Some(pending) = window.pending_aspect_size.take() {
                         if sizes_close(size, pending, 2) {
                             window.resize(gpu, size);
