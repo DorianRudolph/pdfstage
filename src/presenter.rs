@@ -660,7 +660,7 @@ impl PresenterWindow {
     }
 
     pub(crate) fn start_modified_window_drag(
-        &self,
+        &mut self,
         button: MouseButton,
         state: ElementState,
         modifiers: ModifiersState,
@@ -668,7 +668,7 @@ impl PresenterWindow {
         if button != MouseButton::Left || state != ElementState::Pressed {
             return false;
         }
-        if self.window.fullscreen().is_some() || self.fullscreen_transition_until.is_some() {
+        if self.window.fullscreen().is_some() || self.in_fullscreen_transition() {
             return false;
         }
         if !(modifiers.control_key()) {
@@ -693,7 +693,7 @@ impl PresenterWindow {
         {
             return false;
         }
-        if self.window.fullscreen().is_some() || self.fullscreen_transition_until.is_some() {
+        if self.window.fullscreen().is_some() || self.in_fullscreen_transition() {
             return false;
         }
         self.resize_drag =
