@@ -320,6 +320,8 @@ impl App {
         if info.page_count == 0 {
             bail!("reloaded document has no pages");
         }
+        let aspect_changed =
+            self.page_points[0] / self.page_points[1] != info.page_points[0] / info.page_points[1];
         self.source = source;
         self.page_count = info.page_count;
         self.page_points = info.page_points;
@@ -330,10 +332,17 @@ impl App {
                 window.reset_zoom_for_slide_change();
             }
         }
-        if !self.args.free_aspect {
-            let requested_size = window_size_for_page(self.page_points);
-            for window in self.windows.values() {
-                let _ = window.request_surface_size(requested_size, "reload-aspect-reset");
+        if aspect_changed && !self.args.free_aspect {
+            for window in self.windows.values_mut() {
+                // Keep the fullscreen surface at the size chosen by the compositor.
+                if window.window.fullscreen().is_some() || window.in_fullscreen_transition() {
+                    continue;
+                }
+                if let Some(corrected) =
+                    aspect_corrected_size(window.window.surface_size(), self.page_points)
+                {
+                    let _ = window.request_surface_size(corrected, "reload-aspect-correction");
+                }
             }
         }
         self.update_window_titles();
@@ -554,6 +563,7 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::PixelDelta(delta) => {
                             scroll_navigation_delta(delta.x, delta.y)
                         }
+                        _ => None,
                     };
                     if let Some(delta) = delta {
                         self.go(delta);

@@ -128,6 +128,7 @@ impl PresenterWindow {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: gpu.surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
@@ -563,7 +564,7 @@ impl PresenterWindow {
         }
         self.window.pre_present_notify();
         gpu.queue.submit(Some(encoder.finish()));
-        frame.present();
+        gpu.queue.present(frame);
         Ok(())
     }
 

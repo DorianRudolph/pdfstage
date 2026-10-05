@@ -102,6 +102,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renders_pdf_with_unembedded_standard_font() {
+        let document =
+            Document::from_bytes(include_bytes!("../tests/fixtures/base14.pdf"), "pdf").unwrap();
+        assert_eq!(document.page_count().unwrap(), 1);
+        let page = document.load_page(0).unwrap();
+        let pixmap = page
+            .to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), false, true)
+            .unwrap();
+        assert_eq!((pixmap.width(), pixmap.height()), (200, 100));
+        assert!(pixmap.samples().iter().any(|&sample| sample < 128), "text must be visible");
+    }
+
+    #[test]
     fn aspect_corrected_size_accepts_single_pixel_rounding() {
         assert_eq!(aspect_corrected_size(PhysicalSize::new(2024, 1140), [16.0, 9.0]), None);
     }

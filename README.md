@@ -16,7 +16,7 @@ No-frills presentation tool for PDFs.
 Tested on Linux and Mac.
 
 ```sh
-cargo install --git https://github.com/dorianrudolph/pdfstage
+cargo install --git https://github.com/dorianrudolph/pdfstage --locked
 ```
 
 ```sh

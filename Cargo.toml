@@ -5,18 +5,19 @@ edition = "2024"
 license = "AGPL-3.0"
 
 [dependencies]
-anyhow = "1.0.100"
-bytemuck = { version = "1.25.0", features = ["derive"] }
-clap = { version = "4.6.1", features = ["derive"] }
-env_logger = "0.11.8"
-log = "0.4.28"
-mupdf = { version = "0.6.0", default-features = false }
-pollster = "0.4.0"
-wgpu = "29.0.3"
-winit = { git = "https://github.com/rust-windowing/winit" }
+anyhow = "1.0.104"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
+env_logger = "0.11.11"
+log = "0.4.34"
+mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts"] }
+pollster = "1.0.1"
+wgpu = "30.0.1"
+# The app uses the 0.31 window and event APIs; pin the published beta until stable.
+winit = "=0.31.0-beta.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSEvent", "NSImage", "block2", "objc2-core-foundation"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
