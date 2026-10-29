@@ -24,8 +24,10 @@ use crate::{
     constants::{PIXEL_ZOOM_SPEED, WHEEL_ZOOM_STEP},
     gpu::Gpu,
     icon::{app_window_icon, set_macos_app_icon},
-    pdf::{PdfSource, aspect_corrected_size, scroll_navigation_delta, window_size_for_page},
-    platform::set_window_decorations,
+    pdf::{
+        LinkTarget, PdfSource, aspect_corrected_size, scroll_navigation_delta, window_size_for_page,
+    },
+    platform::{Navigation, open_uri, set_window_decorations, shift_key_pressed},
     presenter::PresenterWindow,
     render::RenderRequest,
 };
@@ -58,8 +60,107 @@ fn mouse_navigation_delta(button: MouseButton, state: ElementState) -> Option<i3
     }
 }
 
+fn keyboard_history_delta<Str: AsRef<str>>(
+    key: &Key<Str>,
+    modifiers: ModifiersState,
+) -> Option<i32> {
+    if !modifiers.shift_key() {
+        return None;
+    }
+    match key {
+        Key::Named(NamedKey::ArrowLeft | NamedKey::BrowserBack | NamedKey::GoBack) => Some(-1),
+        Key::Named(NamedKey::ArrowRight | NamedKey::BrowserForward) => Some(1),
+        _ => None,
+    }
+}
+
 fn is_mouse_navigation_button(button: MouseButton) -> bool {
     matches!(button, MouseButton::Back | MouseButton::Forward)
+}
+
+#[derive(Default)]
+struct LinkHistory {
+    back: Vec<usize>,
+    forward: Vec<usize>,
+}
+
+impl LinkHistory {
+    fn record_jump(&mut self, current: usize, target: usize) {
+        if current != target {
+            self.back.push(current);
+            self.forward.clear();
+        }
+    }
+
+    fn step(&mut self, current: usize, direction: i32) -> Option<usize> {
+        let (from, to) = if direction < 0 {
+            (&mut self.back, &mut self.forward)
+        } else {
+            (&mut self.forward, &mut self.back)
+        };
+        let target = from.pop()?;
+        to.push(current);
+        Some(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LinkHistory, keyboard_history_delta};
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    #[test]
+    fn shift_browser_keys_use_link_history() {
+        for (key, direction) in [
+            (NamedKey::BrowserBack, -1),
+            (NamedKey::GoBack, -1),
+            (NamedKey::ArrowLeft, -1),
+            (NamedKey::BrowserForward, 1),
+            (NamedKey::ArrowRight, 1),
+        ] {
+            let key: Key = Key::Named(key);
+            assert_eq!(keyboard_history_delta(&key, ModifiersState::SHIFT), Some(direction));
+            assert_eq!(keyboard_history_delta(&key, ModifiersState::ALT), None);
+            assert_eq!(keyboard_history_delta(&key, ModifiersState::empty()), None);
+        }
+    }
+
+    #[test]
+    fn link_history_supports_multiple_back_and_forward_steps() {
+        let mut history = LinkHistory::default();
+        assert_eq!(history.step(0, -1), None);
+        assert_eq!(history.step(0, 1), None);
+        history.record_jump(0, 5);
+        history.record_jump(5, 9);
+        assert_eq!(history.step(9, -1), Some(5));
+        assert_eq!(history.step(5, -1), Some(0));
+        assert_eq!(history.step(0, -1), None);
+        assert_eq!(history.step(0, 1), Some(5));
+        assert_eq!(history.step(5, 1), Some(9));
+        assert_eq!(history.step(9, 1), None);
+    }
+
+    #[test]
+    fn new_link_jump_discards_forward_history() {
+        let mut history = LinkHistory::default();
+        history.record_jump(0, 5);
+        history.record_jump(5, 9);
+        assert_eq!(history.step(9, -1), Some(5));
+        history.record_jump(5, 12);
+        assert_eq!(history.step(12, 1), None);
+        assert_eq!(history.step(12, -1), Some(5));
+        assert_eq!(history.step(5, -1), Some(0));
+    }
+
+    #[test]
+    fn back_remembers_current_slide_after_normal_navigation() {
+        let mut history = LinkHistory::default();
+        history.record_jump(0, 5);
+        // Ordinary navigation from slide 5 to slide 7 adds no history entry.
+        assert_eq!(history.step(7, -1), Some(0));
+        history.record_jump(0, 0);
+        assert_eq!(history.step(0, 1), Some(7));
+    }
 }
 
 pub(crate) struct App {
@@ -69,12 +170,13 @@ pub(crate) struct App {
     page_count: usize,
     page_points: [f32; 2],
     current_page: usize,
+    link_history: LinkHistory,
     direction: i32,
     request_counter: u64,
     windows: HashMap<WindowId, PresenterWindow>,
     gpu: Option<Gpu>,
     proxy: EventLoopProxy,
-    mac_nav_rx: Receiver<i32>,
+    mac_nav_rx: Receiver<Navigation>,
     last_reload_check: Instant,
     modifiers: ModifiersState,
     quitting: bool,
@@ -84,7 +186,7 @@ impl App {
     pub(crate) fn new(
         args: Args,
         proxy: EventLoopProxy,
-        mac_nav_rx: Receiver<i32>,
+        mac_nav_rx: Receiver<Navigation>,
     ) -> Result<Self> {
         let source = PdfSource::load(&args.pdf, 1)?;
         let info = source.info()?;
@@ -98,6 +200,7 @@ impl App {
             page_count: info.page_count,
             page_points: info.page_points,
             current_page: 0,
+            link_history: LinkHistory::default(),
             direction: 1,
             request_counter: 0,
             windows: HashMap::new(),
@@ -268,9 +371,22 @@ impl App {
         }
     }
 
+    fn go_history(&mut self, direction: i32) -> bool {
+        log::debug!(target: "pdfstage::input", "history direction={direction} page={} back={:?} forward={:?}", self.current_page + 1, self.link_history.back, self.link_history.forward);
+        let Some(page) = self.link_history.step(self.current_page, direction) else {
+            return false;
+        };
+        self.go(page as i32 - self.current_page as i32);
+        true
+    }
+
     fn drain_macos_navigation(&mut self) {
-        while let Ok(delta) = self.mac_nav_rx.try_recv() {
-            self.go(delta);
+        while let Ok(navigation) = self.mac_nav_rx.try_recv() {
+            if navigation.history {
+                self.go_history(navigation.delta);
+            } else {
+                self.go(navigation.delta);
+            }
         }
     }
 
@@ -325,6 +441,7 @@ impl App {
         self.source = source;
         self.page_count = info.page_count;
         self.page_points = info.page_points;
+        self.link_history = LinkHistory::default();
         let old_current_page = self.current_page;
         self.current_page = self.current_page.min(self.page_count - 1);
         if self.current_page != old_current_page {
@@ -529,9 +646,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerButton { button, state, position, .. } => {
+                log::debug!(target: "pdfstage::input", "pointer button={button:?} state={state:?} modifiers={:?}", self.modifiers);
                 if let Some(button) = button.mouse_button() {
                     if let Some(delta) = mouse_navigation_delta(button, state) {
-                        self.go(delta);
+                        if shift_key_pressed(self.modifiers.shift_key()) {
+                            self.go_history(delta);
+                        } else {
+                            self.go(delta);
+                        }
                         return;
                     }
                     if is_mouse_navigation_button(button) {
@@ -547,12 +669,34 @@ impl ApplicationHandler for App {
                     if window.finish_modified_window_resize(button, state) {
                         return;
                     }
+                    if button == MouseButton::Left
+                        && self.modifiers.shift_key()
+                        && state == ElementState::Pressed
+                    {
+                        let point = window.page_unit_at(position, self.page_points);
+                        match self.source.link_at(self.current_page, [point.x, point.y]) {
+                            Ok(Some(LinkTarget::Page(page))) if page < self.page_count => {
+                                log::debug!(target: "pdfstage::input", "link jump {} -> {}", self.current_page + 1, page + 1);
+                                self.link_history.record_jump(self.current_page, page);
+                                self.go(page as i32 - self.current_page as i32);
+                            }
+                            Ok(Some(LinkTarget::Uri(uri))) => {
+                                if let Err(err) = open_uri(&uri) {
+                                    eprintln!("opening PDF link failed: {err}");
+                                }
+                            }
+                            Err(err) => eprintln!("reading PDF link failed: {err:?}"),
+                            _ => {}
+                        }
+                        return;
+                    }
                     let _ = self.mirror_pointer_moved(window_id, position);
                     self.mirror_pointer_button(window_id, button, state);
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                log::debug!(target: "pdfstage::input", "modifiers={:?}", self.modifiers);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.modifiers.shift_key() {
@@ -641,6 +785,18 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
                 if event.state.is_pressed() =>
             {
+                if let Key::Named(key) = &event.logical_key {
+                    log::debug!(target: "pdfstage::input", "key={key:?} physical={:?} modifiers={:?}", event.physical_key, self.modifiers);
+                }
+                let mut navigation_modifiers = self.modifiers;
+                navigation_modifiers
+                    .set(ModifiersState::SHIFT, shift_key_pressed(self.modifiers.shift_key()));
+                if let Some(direction) =
+                    keyboard_history_delta(&event.logical_key, navigation_modifiers)
+                {
+                    self.go_history(direction);
+                    return;
+                }
                 if let Some(delta) = keyboard_navigation_delta(&event.logical_key) {
                     self.go(delta);
                     return;

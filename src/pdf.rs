@@ -13,6 +13,12 @@ pub(crate) struct PdfSource {
     pub(crate) modified: Option<SystemTime>,
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum LinkTarget {
+    Page(usize),
+    Uri(String),
+}
+
 impl PdfSource {
     pub(crate) fn load(path: &PathBuf, generation: u64) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -31,6 +37,37 @@ impl PdfSource {
             [bounds.width().max(1.0), bounds.height().max(1.0)]
         };
         Ok(PdfInfo { page_count, page_points })
+    }
+
+    pub(crate) fn link_at(
+        &self,
+        page_index: usize,
+        position: [f64; 2],
+    ) -> Result<Option<LinkTarget>> {
+        if !position.iter().all(|value| (0.0..=1.0).contains(value)) {
+            return Ok(None);
+        }
+        let document = Document::from_bytes(&self.bytes, "pdf")?;
+        let page = document.load_page(page_index as i32)?;
+        let bounds = page.bounds()?;
+        let x = bounds.x0 + position[0] as f32 * bounds.width();
+        let y = bounds.y0 + position[1] as f32 * bounds.height();
+        for link in page.links()? {
+            let rect = link.bounds;
+            if x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1 {
+                if let Some(destination) = link.dest {
+                    return Ok(Some(LinkTarget::Page(destination.loc.page_number as usize)));
+                }
+                let scheme = link.uri.split(':').next().unwrap_or("");
+                if ["http", "https", "mailto"]
+                    .iter()
+                    .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+                {
+                    return Ok(Some(LinkTarget::Uri(link.uri)));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -100,6 +137,26 @@ pub(crate) fn scroll_navigation_delta(x: f64, y: f64) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_pdf_links_in_page_coordinates() {
+        let source = PdfSource {
+            bytes: Arc::new(include_bytes!("../tests/fixtures/links.pdf").to_vec()),
+            generation: 1,
+            modified: None,
+        };
+        assert_eq!(
+            source.link_at(0, [0.2, 0.2]).unwrap(),
+            Some(LinkTarget::Uri("https://example.com/".into()))
+        );
+        assert_eq!(source.link_at(0, [0.7, 0.75]).unwrap(), Some(LinkTarget::Page(1)));
+        assert_eq!(source.link_at(0, [0.95, 0.5]).unwrap(), None);
+        assert_eq!(source.link_at(0, [-0.1, 0.2]).unwrap(), None);
+        assert_eq!(source.link_at(0, [0.2, 1.1]).unwrap(), None);
+        assert_eq!(source.link_at(0, [f64::NAN, 0.2]).unwrap(), None);
+        assert_eq!(source.link_at(0, [0.2, 0.75]).unwrap(), None);
+        assert_eq!(source.link_at(1, [0.2, 0.2]).unwrap(), None);
+    }
 
     #[test]
     fn renders_pdf_with_unembedded_standard_font() {

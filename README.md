@@ -37,8 +37,11 @@ pdfstage [OPTIONS] <PDF>
 
 ## Controls
 
-- `Right`, `PageDown`, `Enter`, `Space`, mouse forward, `Shift` + scroll down: next slide
-- `Left`, `PageUp`, `Backspace`, mouse back, `Shift` + scroll up: previous slide
+- `Right`, `PageDown`, `Enter`, `Space`, `Shift` + scroll down: next slide
+- `Left`, `PageUp`, `Backspace`, `Shift` + scroll up: previous slide
+- `Shift` + `Left` / `Right`: back / forward through PDF link history
+- Mouse back / forward: previous / next slide
+- `Shift` + mouse back / forward: back / forward through PDF link history
 - `Home` / `End`: first / last slide
 - `0`: reset zoom
 - `f` or `F11`: toggle fullscreen
@@ -50,10 +53,14 @@ pdfstage [OPTIONS] <PDF>
 - Touchpad pinch: zoom in / out
 - Two-finger pan or middle mouse drag while zoomed: pan
 - Left mouse hold: laser pointer
-- Right mouse drag: highlight
+- Right mouse drag: highlight a rectangle by slightly dimming everything outside it
+- `Shift` + left click: follow a PDF link (jump to a slide, or open a web/email link in the default app)
 - Middle mouse hold while not zoomed: magnifier
 - `Ctrl` + left drag: move window
 - `Ctrl` + right drag: resize window
+
+Only internal PDF link jumps add to the history. Following a new link clears forward history;
+reloading the PDF clears all link history.
 
 ## License
 

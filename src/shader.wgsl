@@ -94,13 +94,10 @@ fn highlight_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     let a = min(uniforms.highlight.xy, uniforms.highlight.zw);
     let b = max(uniforms.highlight.xy, uniforms.highlight.zw);
     let inside = pixel.x >= a.x && pixel.x <= b.x && pixel.y >= a.y && pixel.y <= b.y;
-    if (!inside) {
+    if (inside) {
         return color;
     }
-    return vec4<f32>(
-        mix(color.rgb, vec3<f32>(1.0, 0.88, 0.05), 0.35),
-        color.a
-    );
+    return vec4<f32>(color.rgb * 0.65, color.a);
 }
 
 fn magnifier_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
