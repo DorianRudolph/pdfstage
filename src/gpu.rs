@@ -10,6 +10,21 @@ use crate::{
     render::{RenderKey, RenderedPage, SourceRectKey},
 };
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shader_is_valid() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("shader.wgsl"))
+            .expect("shader must parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("shader must validate");
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct Uniforms {

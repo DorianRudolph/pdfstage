@@ -57,12 +57,13 @@ fn sample_page(pixel: vec2<f32>) -> vec4<f32> {
     return textureSampleLevel(pdf_texture, pdf_sampler, uv, 0.0);
 }
 
-fn dist_to_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+// Distance and interpolation parameter at the closest point on a segment.
+fn segment_sample(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     let pa = p - a;
     let ba = b - a;
     let denom = max(dot(ba, ba), 0.0001);
     let h = clamp(dot(pa, ba) / denom, 0.0, 1.0);
-    return length(pa - ba * h);
+    return vec2<f32>(length(pa - ba * h), h);
 }
 
 fn laser_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
@@ -78,14 +79,37 @@ fn laser_overlay(pixel: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
         if (i >= count) {
             break;
         }
-        let a = laser.points[i - 1].xy;
-        let b = laser.points[i].xy;
-        let d = dist_to_segment(pixel, a, b);
-        let age = f32(i) / max(uniforms.mouse_flags.w, 1.0);
-        alpha = max(alpha, smoothstep(tail_radius, 0.0, d) * age);
+        let p0 = laser.points[max(i - 2, 0)].xy;
+        let p1 = laser.points[i - 1].xy;
+        let p2 = laser.points[i].xy;
+        let p3 = laser.points[min(i + 1, count - 1)].xy;
+
+        // Catmull-Rom tangents, expressed as Bezier control points so their
+        // convex hull gives a conservative bound, including curve overshoot.
+        let c1 = p1 + (p2 - p0) / 6.0;
+        let c2 = p2 - (p3 - p1) / 6.0;
+        let bounds_min = min(min(p1, p2), min(c1, c2)) - vec2<f32>(tail_radius);
+        let bounds_max = max(max(p1, p2), max(c1, c2)) + vec2<f32>(tail_radius);
+        if (any(pixel < bounds_min) || any(pixel > bounds_max)) {
+            continue;
+        }
+
+        let cubic = -p1 + 3.0 * c1 - 3.0 * c2 + p2;
+        let quadratic = 3.0 * p1 - 6.0 * c1 + 3.0 * c2;
+        let linear = 3.0 * (c1 - p1);
+        var a = p1;
+        for (var step = 1; step <= 4; step = step + 1) {
+            let t = f32(step) / 4.0;
+            let b = ((cubic * t + quadratic) * t + linear) * t + p1;
+            let sample = segment_sample(pixel, a, b);
+            let curve_t = (f32(step - 1) + sample.y) / 4.0;
+            let age = (f32(i - 1) + curve_t) / f32(max(count - 1, 1));
+            alpha = max(alpha, (1.0 - smoothstep(0.0, tail_radius, sample.x)) * age);
+            a = b;
+        }
     }
     let head = uniforms.mouse_flags.xy;
-    alpha = max(alpha, smoothstep(head_radius, 0.0, length(pixel - head)));
+    alpha = max(alpha, 1.0 - smoothstep(0.0, head_radius, length(pixel - head)));
     let laser_color = vec4<f32>(1.0, 0.02, 0.02, 1.0);
     return mix(color, laser_color, clamp(alpha, 0.0, 0.95));
 }
