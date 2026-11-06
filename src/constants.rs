@@ -10,4 +10,5 @@ pub(crate) const ZOOM_EPSILON: f64 = 0.001;
 pub(crate) const WHEEL_ZOOM_STEP: f64 = 1.15;
 pub(crate) const PIXEL_ZOOM_SPEED: f64 = 0.0025;
 pub(crate) const ZOOM_RENDER_DEBOUNCE: Duration = Duration::from_millis(300);
+pub(crate) const CURSOR_HIDE_DELAY: Duration = Duration::from_millis(1500);
 pub(crate) const SOURCE_RECT_SCALE: f64 = 1_000_000.0;

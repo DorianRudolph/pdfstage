@@ -59,8 +59,6 @@ pdfstage [OPTIONS] <PDF>
 - `Ctrl` + left drag: move window
 - `Ctrl` + right drag: resize window
 
-Only internal PDF link jumps add to the history. Following a new link clears forward history;
-reloading the PDF clears all link history.
 
 ## License
 

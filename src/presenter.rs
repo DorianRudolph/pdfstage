@@ -16,8 +16,8 @@ use winit::{
 
 use crate::{
     constants::{
-        FLAG_HIGHLIGHT, FLAG_LASER, FLAG_MAGNIFY, LASER_POINTS, MAX_ZOOM, MIN_ZOOM, ZOOM_EPSILON,
-        ZOOM_RENDER_DEBOUNCE,
+        CURSOR_HIDE_DELAY, FLAG_HIGHLIGHT, FLAG_LASER, FLAG_MAGNIFY, LASER_POINTS, MAX_ZOOM,
+        MIN_ZOOM, ZOOM_EPSILON, ZOOM_RENDER_DEBOUNCE,
     },
     gpu::{Gpu, LaserPoint, Uniforms, create_bind_group},
     icon::app_window_icon,
@@ -47,6 +47,7 @@ pub(crate) struct PresenterWindow {
     pub(crate) fullscreen_transition_until: Option<Instant>,
     pub(crate) pending_aspect_size: Option<PhysicalSize<u32>>,
     pub(crate) mouse: PhysicalPosition<f64>,
+    cursor_hide_at: Option<Instant>,
     pub(crate) mouse_down: Option<MouseButton>,
     pub(crate) highlight_start: Option<PhysicalPosition<f64>>,
     pub(crate) laser: VecDeque<PhysicalPosition<f64>>,
@@ -86,6 +87,7 @@ impl PresenterWindow {
             fullscreen_transition_until: None,
             pending_aspect_size: None,
             mouse: PhysicalPosition::new(0.0, 0.0),
+            cursor_hide_at: None,
             mouse_down: None,
             highlight_start: None,
             laser: VecDeque::new(),
@@ -142,6 +144,25 @@ impl PresenterWindow {
 
     pub(crate) fn id(&self) -> WindowId {
         self.window.id()
+    }
+
+    pub(crate) fn show_cursor(&mut self) {
+        let laser_active = self.flags() & FLAG_LASER != 0;
+        self.window.set_cursor_visible(!laser_active);
+        self.cursor_hide_at = (!laser_active).then(|| Instant::now() + CURSOR_HIDE_DELAY);
+    }
+
+    pub(crate) fn reset_cursor(&mut self) {
+        self.window.set_cursor_visible(true);
+        self.cursor_hide_at = None;
+    }
+
+    pub(crate) fn update_cursor_visibility(&mut self, now: Instant) -> Option<Instant> {
+        if self.cursor_hide_at.is_some_and(|deadline| now >= deadline) {
+            self.window.set_cursor_visible(false);
+            self.cursor_hide_at = None;
+        }
+        self.cursor_hide_at
     }
 
     pub(crate) fn request_surface_size(
@@ -620,6 +641,7 @@ impl PresenterWindow {
                 }
             }
         }
+        self.show_cursor();
         self.window.request_redraw();
     }
 
@@ -702,6 +724,7 @@ impl PresenterWindow {
         self.mouse_down = None;
         self.highlight_start = None;
         self.laser.clear();
+        self.show_cursor();
         true
     }
 

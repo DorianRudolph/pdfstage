@@ -491,7 +491,16 @@ impl App {
         event_loop: &dyn ActiveEventLoop,
         zoom_deadline: Option<Instant>,
     ) {
-        let deadline = [zoom_deadline, self.next_hot_reload_check()].into_iter().flatten().min();
+        let now = Instant::now();
+        let cursor_deadline = self
+            .windows
+            .values_mut()
+            .filter_map(|window| window.update_cursor_visibility(now))
+            .min();
+        let deadline = [zoom_deadline, self.next_hot_reload_check(), cursor_deadline]
+            .into_iter()
+            .flatten()
+            .min();
         if let Some(deadline) = deadline {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         } else {
@@ -544,6 +553,8 @@ impl ApplicationHandler for App {
         };
 
         match event {
+            WindowEvent::PointerEntered { .. } => window.show_cursor(),
+            WindowEvent::PointerLeft { .. } | WindowEvent::Focused(false) => window.reset_cursor(),
             WindowEvent::CloseRequested => {
                 self.windows.remove(&window_id);
                 if self.windows.is_empty() {
@@ -619,6 +630,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerMoved { position, .. } => {
+                window.show_cursor();
                 if let Some(resized) = window.update_modified_window_resize(
                     gpu,
                     position,
@@ -646,6 +658,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::PointerButton { button, state, position, .. } => {
+                window.show_cursor();
                 log::debug!(target: "pdfstage::input", "pointer button={button:?} state={state:?} modifiers={:?}", self.modifiers);
                 if let Some(button) = button.mouse_button() {
                     if let Some(delta) = mouse_navigation_delta(button, state) {
@@ -699,6 +712,7 @@ impl ApplicationHandler for App {
                 log::debug!(target: "pdfstage::input", "modifiers={:?}", self.modifiers);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                window.show_cursor();
                 if self.modifiers.shift_key() {
                     let delta = match delta {
                         MouseScrollDelta::LineDelta(x, y) => {
